@@ -61,12 +61,56 @@ class UnifiedClaudeScheduler {
           boundConsoleAccount.isActive === true &&
           boundConsoleAccount.status === 'active'
         ) {
-          logger.info(
-            `🎯 Using bound dedicated Claude Console account: ${boundConsoleAccount.name} (${apiKeyData.claudeConsoleAccountId}) for API key ${apiKeyData.name}`
-          )
-          return {
-            accountId: apiKeyData.claudeConsoleAccountId,
-            accountType: 'claude-console'
+          // 检查模型支持（已经绑定的账户也需要检查）
+          if (requestedModel && boundConsoleAccount.supportedModels) {
+            logger.info(
+              `🔍 Checking model support for bound account ${boundConsoleAccount.name}: requestedModel=${requestedModel}, supportedModels=${JSON.stringify(boundConsoleAccount.supportedModels)}`
+            )
+
+            if (
+              typeof boundConsoleAccount.supportedModels === 'object' &&
+              !Array.isArray(boundConsoleAccount.supportedModels)
+            ) {
+              // 对象格式：映射表
+              if (
+                Object.keys(boundConsoleAccount.supportedModels).length > 0 &&
+                !claudeConsoleAccountService.isModelSupported(
+                  boundConsoleAccount.supportedModels,
+                  requestedModel
+                )
+              ) {
+                logger.warn(
+                  `🚫 Bound Claude Console account ${boundConsoleAccount.name} does not support model ${requestedModel}`
+                )
+                // 绑定账户不支持该模型，继续使用共享池
+              } else {
+                logger.info(
+                  `🎯 Using bound dedicated Claude Console account: ${boundConsoleAccount.name} (${apiKeyData.claudeConsoleAccountId}) for API key ${apiKeyData.name}`
+                )
+                return {
+                  accountId: apiKeyData.claudeConsoleAccountId,
+                  accountType: 'claude-console'
+                }
+              }
+            } else {
+              // 其他格式或空，允许使用
+              logger.info(
+                `🎯 Using bound dedicated Claude Console account: ${boundConsoleAccount.name} (${apiKeyData.claudeConsoleAccountId}) for API key ${apiKeyData.name}`
+              )
+              return {
+                accountId: apiKeyData.claudeConsoleAccountId,
+                accountType: 'claude-console'
+              }
+            }
+          } else {
+            // 没有请求模型或没有配置支持模型，允许使用
+            logger.info(
+              `🎯 Using bound dedicated Claude Console account: ${boundConsoleAccount.name} (${apiKeyData.claudeConsoleAccountId}) for API key ${apiKeyData.name}`
+            )
+            return {
+              accountId: apiKeyData.claudeConsoleAccountId,
+              accountType: 'claude-console'
+            }
           }
         } else {
           logger.warn(
@@ -105,10 +149,54 @@ class UnifiedClaudeScheduler {
             mappedAccount.accountType
           )
           if (isAvailable) {
-            logger.info(
-              `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
-            )
-            return mappedAccount
+            // 检查Console账户的模型支持
+            if (mappedAccount.accountType === 'claude-console' && requestedModel) {
+              const boundConsoleAccount = await claudeConsoleAccountService.getAccount(
+                mappedAccount.accountId
+              )
+              if (boundConsoleAccount && boundConsoleAccount.supportedModels) {
+                logger.info(
+                  `🔍 Checking model support for sticky session account ${boundConsoleAccount.name}: requestedModel=${requestedModel}, supportedModels=${JSON.stringify(boundConsoleAccount.supportedModels)}`
+                )
+
+                if (
+                  typeof boundConsoleAccount.supportedModels === 'object' &&
+                  !Array.isArray(boundConsoleAccount.supportedModels)
+                ) {
+                  if (
+                    Object.keys(boundConsoleAccount.supportedModels).length > 0 &&
+                    !claudeConsoleAccountService.isModelSupported(
+                      boundConsoleAccount.supportedModels,
+                      requestedModel
+                    )
+                  ) {
+                    logger.warn(
+                      `🚫 Sticky session Console account ${boundConsoleAccount.name} does not support model ${requestedModel}, selecting new account`
+                    )
+                    // 删除不支持该模型的sticky session映射
+                    await this._deleteSessionMapping(sessionHash)
+                    // 继续选择新账户
+                  } else {
+                    logger.info(
+                      `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+                    )
+                    return mappedAccount
+                  }
+                } else {
+                  // 其他格式或空，允许使用
+                  logger.info(
+                    `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+                  )
+                  return mappedAccount
+                }
+              }
+            } else {
+              // 非Console账户或没有请求模型，直接使用
+              logger.info(
+                `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+              )
+              return mappedAccount
+            }
           } else {
             logger.warn(
               `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
@@ -342,6 +430,9 @@ class UnifiedClaudeScheduler {
 
         // 检查模型支持（如果有请求的模型）
         if (requestedModel && account.supportedModels) {
+          logger.info(
+            `🔍 Checking model support for ${account.name}: requestedModel=${requestedModel}, supportedModels=${JSON.stringify(account.supportedModels)}, type=${typeof account.supportedModels}`
+          )
           // 兼容旧格式（数组）和新格式（对象）
           if (Array.isArray(account.supportedModels)) {
             // 旧格式：数组
@@ -349,7 +440,7 @@ class UnifiedClaudeScheduler {
               account.supportedModels.length > 0 &&
               !account.supportedModels.includes(requestedModel)
             ) {
-              logger.info(
+              logger.warn(
                 `🚫 Claude Console account ${account.name} does not support model ${requestedModel}`
               )
               continue

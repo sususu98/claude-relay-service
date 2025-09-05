@@ -693,6 +693,80 @@
                 </div>
               </div>
 
+              <!-- 支持的模型 -->
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  >支持的模型 (可选)</label
+                >
+                <div class="mb-3 rounded-lg bg-blue-50 p-3 dark:bg-blue-900/30">
+                  <p class="text-xs text-blue-700 dark:text-blue-400">
+                    <i class="fas fa-info-circle mr-1" />
+                    留空表示支持所有模型。选择特定模型后，只有这些模型的请求会调度到此账号。
+                  </p>
+                </div>
+
+                <!-- 模型列表 -->
+                <div class="mb-3 space-y-2">
+                  <div
+                    v-for="(model, index) in supportedModelsList"
+                    :key="index"
+                    class="flex items-center gap-2"
+                  >
+                    <input
+                      v-model="model.value"
+                      class="form-input flex-1 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                      placeholder="输入模型名称，如 claude-opus-4-1-20250805"
+                      type="text"
+                    />
+                    <button
+                      class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 dark:hover:bg-red-900/20"
+                      type="button"
+                      @click="removeSupportedModel(index)"
+                    >
+                      <i class="fas fa-trash" />
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 添加模型按钮 -->
+                <button
+                  class="w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-gray-600 dark:text-gray-400 dark:hover:border-gray-500 dark:hover:text-gray-300"
+                  type="button"
+                  @click="addSupportedModel"
+                >
+                  <i class="fas fa-plus mr-2" />
+                  添加支持的模型
+                </button>
+
+                <!-- 快捷添加按钮 -->
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <button
+                    class="rounded-lg bg-blue-100 px-3 py-1 text-xs text-blue-700 transition-colors hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50"
+                    type="button"
+                    @click="addPresetModel('claude-sonnet-4-20250514')"
+                  >
+                    + Sonnet 4
+                  </button>
+                  <button
+                    class="rounded-lg bg-purple-100 px-3 py-1 text-xs text-purple-700 transition-colors hover:bg-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:hover:bg-purple-900/50"
+                    type="button"
+                    @click="addPresetModel('claude-opus-4-1-20250805')"
+                  >
+                    + Opus 4.1
+                  </button>
+                  <button
+                    class="rounded-lg bg-green-100 px-3 py-1 text-xs text-green-700 transition-colors hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50"
+                    type="button"
+                    @click="addPresetModel('claude-3-5-haiku-20241022')"
+                  >
+                    + Haiku 3.5
+                  </button>
+                </div>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  指定此账号支持的模型，留空则支持所有模型
+                </p>
+              </div>
+
               <div>
                 <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
                   >模型映射表 (可选)</label
@@ -1648,8 +1722,82 @@
               </div>
             </div>
 
+            <!-- 支持的模型 -->
             <div>
-              <label class="mb-3 block text-sm font-semibold text-gray-700"
+              <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                >支持的模型 (可选)</label
+              >
+              <div class="mb-3 rounded-lg bg-blue-50 p-3 dark:bg-blue-900/30">
+                <p class="text-xs text-blue-700 dark:text-blue-400">
+                  <i class="fas fa-info-circle mr-1" />
+                  留空表示支持所有模型。选择特定模型后，只有这些模型的请求会调度到此账号。
+                </p>
+              </div>
+
+              <!-- 模型列表 -->
+              <div class="mb-3 space-y-2">
+                <div
+                  v-for="(model, index) in supportedModelsList"
+                  :key="index"
+                  class="flex items-center gap-2"
+                >
+                  <input
+                    v-model="model.value"
+                    class="form-input flex-1 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="输入模型名称，如 claude-opus-4-1-20250805"
+                    type="text"
+                  />
+                  <button
+                    class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 dark:hover:bg-red-900/20"
+                    type="button"
+                    @click="removeSupportedModel(index)"
+                  >
+                    <i class="fas fa-trash" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- 添加模型按钮 -->
+              <button
+                class="w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-gray-600 dark:text-gray-400 dark:hover:border-gray-500 dark:hover:text-gray-300"
+                type="button"
+                @click="addSupportedModel"
+              >
+                <i class="fas fa-plus mr-2" />
+                添加支持的模型
+              </button>
+
+              <!-- 快捷添加按钮 -->
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button
+                  class="rounded-lg bg-blue-100 px-3 py-1 text-xs text-blue-700 transition-colors hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50"
+                  type="button"
+                  @click="addPresetModel('claude-sonnet-4-20250514')"
+                >
+                  + Sonnet 4
+                </button>
+                <button
+                  class="rounded-lg bg-purple-100 px-3 py-1 text-xs text-purple-700 transition-colors hover:bg-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:hover:bg-purple-900/50"
+                  type="button"
+                  @click="addPresetModel('claude-opus-4-1-20250805')"
+                >
+                  + Opus 4.1
+                </button>
+                <button
+                  class="rounded-lg bg-green-100 px-3 py-1 text-xs text-green-700 transition-colors hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50"
+                  type="button"
+                  @click="addPresetModel('claude-3-5-haiku-20241022')"
+                >
+                  + Haiku 3.5
+                </button>
+              </div>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                指定此账号支持的模型，留空则支持所有模型
+              </p>
+            </div>
+
+            <div>
+              <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
                 >模型映射表 (可选)</label
               >
               <div class="mb-3 rounded-lg bg-blue-50 p-3">
@@ -2224,6 +2372,9 @@ const form = ref({
 // 模型映射表数据
 const modelMappings = ref([])
 
+// 支持的模型列表数据
+const supportedModelsList = ref([])
+
 // 初始化模型映射表
 const initModelMappings = () => {
   if (props.account?.supportedModels) {
@@ -2241,6 +2392,22 @@ const initModelMappings = () => {
       modelMappings.value = props.account.supportedModels.map((model) => ({
         from: model,
         to: model
+      }))
+    }
+  }
+}
+
+// 初始化支持的模型列表
+const initSupportedModels = () => {
+  supportedModelsList.value = []
+  if (props.account?.supportedModels) {
+    if (Array.isArray(props.account.supportedModels)) {
+      // 如果是数组格式，直接使用
+      supportedModelsList.value = props.account.supportedModels.map((model) => ({ value: model }))
+    } else if (typeof props.account.supportedModels === 'object') {
+      // 如果是对象映射格式，提取键作为支持的模型
+      supportedModelsList.value = Object.keys(props.account.supportedModels).map((model) => ({
+        value: model
       }))
     }
   }
@@ -2744,7 +2911,26 @@ const createAccount = async () => {
       data.apiUrl = form.value.apiUrl
       data.apiKey = form.value.apiKey
       data.priority = form.value.priority || 50
-      data.supportedModels = convertMappingsToObject() || {}
+
+      // 处理支持的模型和映射
+      const supportedModelsArray = convertSupportedModelsToArray()
+      const mappingsObject = convertMappingsToObject()
+
+      if (supportedModelsArray.length > 0) {
+        // 如果指定了支持的模型，创建简单映射（模型映射到自身）
+        data.supportedModels = {}
+        supportedModelsArray.forEach((model) => {
+          // 如果有自定义映射，使用映射；否则映射到自身
+          data.supportedModels[model] = mappingsObject?.[model] || model
+        })
+      } else if (mappingsObject) {
+        // 只有映射表，没有指定支持的模型
+        data.supportedModels = mappingsObject
+      } else {
+        // 都没有，支持所有模型
+        data.supportedModels = {}
+      }
+
       data.userAgent = form.value.userAgent || null
       // 如果不启用限流，传递 0 表示不限流
       data.rateLimitDuration = form.value.enableRateLimit ? form.value.rateLimitDuration || 60 : 0
@@ -2944,7 +3130,26 @@ const updateAccount = async () => {
         data.apiKey = form.value.apiKey
       }
       data.priority = form.value.priority || 50
-      data.supportedModels = convertMappingsToObject() || {}
+
+      // 处理支持的模型和映射
+      const supportedModelsArray = convertSupportedModelsToArray()
+      const mappingsObject = convertMappingsToObject()
+
+      if (supportedModelsArray.length > 0) {
+        // 如果指定了支持的模型，创建简单映射（模型映射到自身）
+        data.supportedModels = {}
+        supportedModelsArray.forEach((model) => {
+          // 如果有自定义映射，使用映射；否则映射到自身
+          data.supportedModels[model] = mappingsObject?.[model] || model
+        })
+      } else if (mappingsObject) {
+        // 只有映射表，没有指定支持的模型
+        data.supportedModels = mappingsObject
+      } else {
+        // 都没有，支持所有模型
+        data.supportedModels = {}
+      }
+
       data.userAgent = form.value.userAgent || null
       // 如果不启用限流，传递 0 表示不限流
       data.rateLimitDuration = form.value.enableRateLimit ? form.value.rateLimitDuration || 60 : 0
@@ -3239,6 +3444,27 @@ const removeModelMapping = (index) => {
   modelMappings.value.splice(index, 1)
 }
 
+// 添加支持的模型
+const addSupportedModel = () => {
+  supportedModelsList.value.push({ value: '' })
+}
+
+// 移除支持的模型
+const removeSupportedModel = (index) => {
+  supportedModelsList.value.splice(index, 1)
+}
+
+// 快捷添加预设模型到支持的模型列表
+const addPresetModel = (modelName) => {
+  const exists = supportedModelsList.value.some((m) => m.value === modelName)
+  if (!exists) {
+    supportedModelsList.value.push({ value: modelName })
+    showToast(`已添加模型: ${modelName}`, 'success')
+  } else {
+    showToast(`模型 ${modelName} 已存在`, 'info')
+  }
+}
+
 // 添加预设映射
 const addPresetMapping = (from, to) => {
   // 检查是否已存在相同的映射
@@ -3263,12 +3489,18 @@ const convertMappingsToObject = () => {
   return Object.keys(mapping).length > 0 ? mapping : null
 }
 
+// 转换支持的模型列表为数组
+const convertSupportedModelsToArray = () => {
+  return supportedModelsList.value.map((m) => m.value).filter((v) => v && v.trim())
+}
+
 // 监听账户变化，更新表单
 watch(
   () => props.account,
   (newAccount) => {
     if (newAccount) {
       initModelMappings()
+      initSupportedModels()
       // 重新初始化代理配置
       const proxyConfig =
         newAccount.proxy && newAccount.proxy.host && newAccount.proxy.port
@@ -3453,6 +3685,9 @@ onMounted(() => {
   if (isEdit.value && props.account?.platform === 'claude-console') {
     loadAccountUsage()
   }
+  // 初始化模型配置
+  initModelMappings()
+  initSupportedModels()
 })
 
 // 监听平台变化，当切换到Claude平台时获取统一User-Agent信息
