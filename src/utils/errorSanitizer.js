@@ -64,6 +64,9 @@ const ERROR_MATCHERS = [
   { pattern: /503|service.*unavailable/i, code: 'E001' }
 ]
 
+// 允许透传给客户端的错误模式（客户端可操作的错误，保留原始消息）
+const PASSTHROUGH_PATTERNS = [/prompt is too long/i, /too many tokens/i, /content.{0,20}too long/i]
+
 /**
  * 根据原始错误匹配标准错误码
  * @param {Error|string|object} error - 原始错误
@@ -87,6 +90,41 @@ function mapToErrorCode(error, options = {}) {
       code: errorCode,
       status: statusCode
     })
+  }
+
+  // 优先检查透传模式（客户端可操作的错误，保留原始消息）
+  if (originalMessage) {
+    for (const pattern of PASSTHROUGH_PATTERNS) {
+      if (pattern.test(originalMessage)) {
+        return {
+          code: 'E005',
+          message: originalMessage,
+          status: 400
+        }
+      }
+    }
+  }
+
+  // 基于上游错误 type 字段透传（客户端需要看到原始错误以修正请求或了解服务状态）
+  const upstreamErrorType = error?.error?.type || error?.type || ''
+  if (upstreamErrorType === 'invalid_request_error') {
+    return {
+      code: 'E005',
+      message: originalMessage || 'Invalid request',
+      status: 400
+    }
+  }
+  if (upstreamErrorType === 'no_available_providers') {
+    // 清除内部 session ID，不暴露给客户端
+    const cleanMessage = (originalMessage || 'No available providers').replace(
+      /\s*\(cch_session_id:[^)]*\)/gi,
+      ''
+    )
+    return {
+      code: 'E006',
+      message: cleanMessage,
+      status: 503
+    }
   }
 
   // 匹配错误码
@@ -159,7 +197,20 @@ function extractOriginalMessage(error) {
     return error.message
   }
   if (error.error?.message) {
-    return error.error.message
+    const msg = error.error.message
+    // 尝试解析嵌套 JSON 字符串（Claude Console 会将上游 API 错误包装为 JSON-in-string）
+    try {
+      const lastBrace = msg.lastIndexOf('}')
+      if (lastBrace !== -1) {
+        const parsed = JSON.parse(msg.substring(0, lastBrace + 1))
+        if (parsed.error?.message) {
+          return parsed.error.message
+        }
+      }
+    } catch {
+      // 非嵌套 JSON 格式，使用原始消息
+    }
+    return msg
   }
   if (error.response?.data?.error?.message) {
     return error.response.data.error.message
