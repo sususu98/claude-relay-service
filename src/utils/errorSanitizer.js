@@ -64,6 +64,9 @@ const ERROR_MATCHERS = [
   { pattern: /503|service.*unavailable/i, code: 'E001' }
 ]
 
+// 允许透传给客户端的错误模式（客户端可操作的错误，保留原始消息）
+const PASSTHROUGH_PATTERNS = [/prompt is too long/i, /too many tokens/i, /content.{0,20}too long/i]
+
 /**
  * 根据原始错误匹配标准错误码
  * @param {Error|string|object} error - 原始错误
@@ -75,8 +78,8 @@ const ERROR_MATCHERS = [
 function mapToErrorCode(error, options = {}) {
   const { context = 'unknown', logOriginal = true } = options
 
-  // 提取原始错误信息
-  const originalMessage = extractOriginalMessage(error)
+  // 提取原始错误信息（含嵌套 JSON 中的 type）
+  const { message: originalMessage, type: upstreamErrorType } = extractErrorInfo(error)
   const errorCode = error?.code || error?.response?.status
   const statusCode = error?.response?.status || error?.status || error?.statusCode
 
@@ -87,6 +90,40 @@ function mapToErrorCode(error, options = {}) {
       code: errorCode,
       status: statusCode
     })
+  }
+
+  // 优先检查透传模式（客户端可操作的错误，保留原始消息）
+  if (originalMessage) {
+    for (const pattern of PASSTHROUGH_PATTERNS) {
+      if (pattern.test(originalMessage)) {
+        return {
+          code: 'E005',
+          message: originalMessage,
+          status: 400
+        }
+      }
+    }
+  }
+
+  // 基于上游错误 type 字段透传（客户端需要看到原始错误以修正请求或了解服务状态）
+  if (upstreamErrorType === 'invalid_request_error') {
+    return {
+      code: 'E005',
+      message: originalMessage || 'Invalid request',
+      status: 400
+    }
+  }
+  if (upstreamErrorType === 'no_available_providers') {
+    // 清除内部 session ID，不暴露给客户端
+    const cleanMessage = (originalMessage || 'No available providers').replace(
+      /\s*\(cch_session_id:[^)]*\)/gi,
+      ''
+    )
+    return {
+      code: 'E006',
+      message: cleanMessage,
+      status: 503
+    }
   }
 
   // 匹配错误码
@@ -146,31 +183,66 @@ function mapToErrorCode(error, options = {}) {
 }
 
 /**
+ * 提取原始错误信息（消息和错误类型）
+ * @returns {{ message: string, type: string }}
+ */
+function extractErrorInfo(error) {
+  const result = { message: '', type: '' }
+  if (!error) {
+    return result
+  }
+  if (typeof error === 'string') {
+    result.message = error
+    return result
+  }
+  // 提取直接可用的 type 字段
+  result.type = error.error?.type || error.type || ''
+  if (error.message) {
+    result.message = error.message
+    return result
+  }
+  if (error.error?.message) {
+    const msg = error.error.message
+    // 尝试解析嵌套 JSON 字符串（Claude Console 会将上游 API 错误包装为 JSON-in-string）
+    try {
+      const lastBrace = msg.lastIndexOf('}')
+      if (lastBrace !== -1) {
+        const parsed = JSON.parse(msg.substring(0, lastBrace + 1))
+        if (parsed.error?.message) {
+          result.message = parsed.error.message
+          // 从嵌套 JSON 中补充错误类型（外层无 type 时使用内层的）
+          if (!result.type && parsed.error?.type) {
+            result.type = parsed.error.type
+          }
+          return result
+        }
+      }
+    } catch {
+      // 非嵌套 JSON 格式，使用原始消息
+    }
+    result.message = msg
+    return result
+  }
+  if (error.response?.data?.error?.message) {
+    result.message = error.response.data.error.message
+    return result
+  }
+  if (error.response?.data?.error) {
+    result.message = String(error.response.data.error)
+    return result
+  }
+  if (error.response?.data?.message) {
+    result.message = error.response.data.message
+    return result
+  }
+  return result
+}
+
+/**
  * 提取原始错误消息
  */
 function extractOriginalMessage(error) {
-  if (!error) {
-    return ''
-  }
-  if (typeof error === 'string') {
-    return error
-  }
-  if (error.message) {
-    return error.message
-  }
-  if (error.error?.message) {
-    return error.error.message
-  }
-  if (error.response?.data?.error?.message) {
-    return error.response.data.error.message
-  }
-  if (error.response?.data?.error) {
-    return String(error.response.data.error)
-  }
-  if (error.response?.data?.message) {
-    return error.response.data.message
-  }
-  return ''
+  return extractErrorInfo(error).message
 }
 
 /**
