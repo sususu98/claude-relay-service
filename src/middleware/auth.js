@@ -1198,14 +1198,11 @@ const authenticateApiKey = async (req, res, next) => {
 
         // 使用 402 Payment Required 而非 429，避免客户端自动重试
         return res.status(402).json({
+          type: 'error',
           error: {
-            type: 'insufficient_quota',
-            message: `已达到每日费用限制 ($${dailyCostLimit})`,
-            code: 'daily_cost_limit_exceeded'
-          },
-          currentCost: dailyCost,
-          costLimit: dailyCostLimit,
-          resetAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString()
+            type: 'billing_error',
+            message: `已达到每日费用限制 ($${dailyCostLimit})，当前: $${dailyCost.toFixed(2)}，重置时间: ${new Date(new Date().setHours(24, 0, 0, 0)).toISOString()}`
+          }
         })
       }
 
@@ -1231,13 +1228,11 @@ const authenticateApiKey = async (req, res, next) => {
 
         // 使用 402 Payment Required 而非 429，避免客户端自动重试
         return res.status(402).json({
+          type: 'error',
           error: {
-            type: 'insufficient_quota',
-            message: `已达到总费用限制 ($${totalCostLimit})`,
-            code: 'total_cost_limit_exceeded'
-          },
-          currentCost: totalCost,
-          costLimit: totalCostLimit
+            type: 'billing_error',
+            message: `已达到总费用限制 ($${totalCostLimit})，当前: $${totalCost.toFixed(2)}`
+          }
         })
       }
 
@@ -1273,14 +1268,11 @@ const authenticateApiKey = async (req, res, next) => {
 
           // 使用 402 Payment Required 而非 429，避免客户端自动重试
           return res.status(402).json({
+            type: 'error',
             error: {
-              type: 'insufficient_quota',
-              message: `已达到 Claude 模型周费用限制 ($${weeklyOpusCostLimit})`,
-              code: 'weekly_opus_cost_limit_exceeded'
-            },
-            currentCost: weeklyOpusCost,
-            costLimit: weeklyOpusCostLimit,
-            resetAt: resetDate.toISOString()
+              type: 'billing_error',
+              message: `已达到 Claude 模型周费用限制 ($${weeklyOpusCostLimit})，当前: $${weeklyOpusCost.toFixed(2)}，重置时间: ${resetDate.toISOString()}`
+            }
           })
         }
 
