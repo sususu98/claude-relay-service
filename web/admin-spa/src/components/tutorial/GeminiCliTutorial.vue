@@ -38,7 +38,7 @@
               </div>
               <div class="whitespace-nowrap text-gray-300">$env:GEMINI_API_KEY = "你的API密钥"</div>
               <div class="whitespace-nowrap text-gray-300">
-                $env:GEMINI_MODEL = "gemini-2.5-pro"
+                $env:GEMINI_MODEL = "gemini-3.1-pro-preview"
               </div>
             </div>
             <p class="mt-2 text-xs text-yellow-700 dark:text-yellow-400">
