@@ -18,6 +18,7 @@ class PricingService {
       'model_prices_and_context_window.json'
     )
     this.localHashFile = path.join(this.dataDir, 'model_pricing.sha256')
+    this.localPricingFile = path.join(this.dataDir, 'local_pricing.json')
     this.pricingData = null
     this.lastUpdated = null
     this.updateInterval = 24 * 60 * 60 * 1000 // 24小时
@@ -263,6 +264,7 @@ class PricingService {
 
             // 更新内存中的数据
             this.pricingData = jsonData
+            this.applyLocalPricing()
             this.lastUpdated = new Date()
 
             logger.success(`Downloaded pricing data for ${Object.keys(jsonData).length} models`)
@@ -329,6 +331,7 @@ class PricingService {
 
         // 更新内存中的数据
         this.pricingData = jsonData
+        this.applyLocalPricing()
         this.lastUpdated = new Date()
 
         // 设置或重新设置文件监听器
@@ -348,6 +351,27 @@ class PricingService {
     } catch (error) {
       logger.error('❌ Failed to use fallback pricing data:', error)
       this.pricingData = {}
+    }
+  }
+
+  // 合并本地定价覆盖（local_pricing.json 优先级最高）
+  applyLocalPricing() {
+    try {
+      if (!fs.existsSync(this.localPricingFile)) {
+        return
+      }
+      const localData = JSON.parse(fs.readFileSync(this.localPricingFile, 'utf8'))
+      if (!this.pricingData || typeof localData !== 'object') {
+        return
+      }
+      const count = Object.keys(localData).length
+      if (count === 0) {
+        return
+      }
+      Object.assign(this.pricingData, localData)
+      logger.info(`🏷️  Applied ${count} local pricing override(s) from local_pricing.json`)
+    } catch (error) {
+      logger.warn(`⚠️  Failed to load local pricing overrides: ${error.message}`)
     }
   }
 
@@ -845,6 +869,7 @@ class PricingService {
 
       // 更新内存中的数据
       this.pricingData = jsonData
+      this.applyLocalPricing()
       this.lastUpdated = new Date()
 
       const modelCount = Object.keys(jsonData).length
