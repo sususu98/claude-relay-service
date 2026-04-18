@@ -559,12 +559,24 @@ class PricingService {
       (typeof standardPricing?.litellm_provider === 'string' &&
         standardPricing.litellm_provider.toLowerCase().includes('anthropic'))
 
+    // 检测模型是否有 272K 分档字段（GPT-5.x 系列）
+    const has272kPricing =
+      pricing &&
+      pricing.input_cost_per_token_above_272k_tokens !== null &&
+      pricing.input_cost_per_token_above_272k_tokens !== undefined
+    const longContextThreshold272k = 272000
+
     // Fast Mode 倍率：优先从 provider_specific_entry.fast 读取，默认 6 倍
     const fastMultiplier = isFastModeRequest ? pricing?.provider_specific_entry?.fast || 6 : 1
 
-    // 当 [1m] 模型总输入超过 200K 时，进入 200K+ 计费逻辑
-    // 根据 Anthropic 官方文档：当总输入超过 200K 时，整个请求所有 token 类型都使用高档价格
-    if (isLongContextModeEnabled && totalInputTokens > 200000) {
+    // 分档计费触发：优先检查 272K（GPT-5.x），其次 200K（Claude [1m]）
+    if (has272kPricing && totalInputTokens > longContextThreshold272k) {
+      isLongContextRequest = true
+      useLongContextPricing = true
+      logger.info(
+        `💰 Using 272K+ pricing for ${modelName}: total input tokens = ${totalInputTokens.toLocaleString()}`
+      )
+    } else if (isLongContextModeEnabled && totalInputTokens > 200000) {
       if (ignores200kLongContextPricing) {
         logger.info(
           `💰 Skipping 200K+ pricing for ${modelName}: Claude models use flat pricing regardless of context length`
@@ -608,27 +620,35 @@ class PricingService {
     }
 
     const baseInputPrice = pricing.input_cost_per_token || 0
-    const hasInput200kPrice =
-      pricing.input_cost_per_token_above_200k_tokens !== null &&
-      pricing.input_cost_per_token_above_200k_tokens !== undefined
+    const hasInputAbovePrice = has272kPricing
+      ? pricing.input_cost_per_token_above_272k_tokens !== null &&
+        pricing.input_cost_per_token_above_272k_tokens !== undefined
+      : pricing.input_cost_per_token_above_200k_tokens !== null &&
+        pricing.input_cost_per_token_above_200k_tokens !== undefined
 
-    // 确定实际使用的输入价格（普通或 200K+ 高档价格）
+    // 确定实际使用的输入价格（普通或分档高档价格）
     // Claude 模型在 200K+ 场景下如果缺少官方字段，按 2 倍输入价兜底
     let actualInputPrice = useLongContextPricing
-      ? hasInput200kPrice
-        ? pricing.input_cost_per_token_above_200k_tokens
+      ? hasInputAbovePrice
+        ? has272kPricing
+          ? pricing.input_cost_per_token_above_272k_tokens
+          : pricing.input_cost_per_token_above_200k_tokens
         : isClaudeModel
           ? baseInputPrice * 2
           : baseInputPrice
       : baseInputPrice
 
     const baseOutputPrice = pricing.output_cost_per_token || 0
-    const hasOutput200kPrice =
-      pricing.output_cost_per_token_above_200k_tokens !== null &&
-      pricing.output_cost_per_token_above_200k_tokens !== undefined
+    const hasOutputAbovePrice = has272kPricing
+      ? pricing.output_cost_per_token_above_272k_tokens !== null &&
+        pricing.output_cost_per_token_above_272k_tokens !== undefined
+      : pricing.output_cost_per_token_above_200k_tokens !== null &&
+        pricing.output_cost_per_token_above_200k_tokens !== undefined
     let actualOutputPrice = useLongContextPricing
-      ? hasOutput200kPrice
-        ? pricing.output_cost_per_token_above_200k_tokens
+      ? hasOutputAbovePrice
+        ? has272kPricing
+          ? pricing.output_cost_per_token_above_272k_tokens
+          : pricing.output_cost_per_token_above_200k_tokens
         : baseOutputPrice
       : baseOutputPrice
 
@@ -638,25 +658,41 @@ class PricingService {
     let actualEphemeral1hPrice = 0
 
     if (useLongContextPricing) {
-      // 200K+：Claude 仅用 above_200k 专用字段，缺失留 0 让下方兜底从 actualInputPrice 推导
-      actualCacheCreatePrice = isClaudeModel
-        ? pricing.cache_creation_input_token_cost_above_200k_tokens || 0
-        : pricing.cache_creation_input_token_cost_above_200k_tokens ||
+      // 分档：优先取对应阈值的 above 字段，缺失回退到基础价格
+      if (has272kPricing) {
+        actualCacheCreatePrice =
+          pricing.cache_creation_input_token_cost_above_272k_tokens ||
           pricing.cache_creation_input_token_cost ||
           0
-      actualCacheReadPrice = isClaudeModel
-        ? pricing.cache_read_input_token_cost_above_200k_tokens || 0
-        : pricing.cache_read_input_token_cost_above_200k_tokens ||
+        actualCacheReadPrice =
+          pricing.cache_read_input_token_cost_above_272k_tokens ||
           pricing.cache_read_input_token_cost ||
           0
-      const has1h200k =
-        pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens !== null &&
-        pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens !== undefined
-      actualEphemeral1hPrice = has1h200k
-        ? pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens
-        : isClaudeModel
-          ? 0
-          : pricing.cache_creation_input_token_cost_above_1hr || 0
+        actualEphemeral1hPrice =
+          pricing.cache_creation_input_token_cost_above_1hr_above_272k_tokens ||
+          pricing.cache_creation_input_token_cost_above_1hr ||
+          0
+      } else {
+        // 200K+：Claude 仅用 above_200k 专用字段，缺失留 0 让下方兜底从 actualInputPrice 推导
+        actualCacheCreatePrice = isClaudeModel
+          ? pricing.cache_creation_input_token_cost_above_200k_tokens || 0
+          : pricing.cache_creation_input_token_cost_above_200k_tokens ||
+            pricing.cache_creation_input_token_cost ||
+            0
+        actualCacheReadPrice = isClaudeModel
+          ? pricing.cache_read_input_token_cost_above_200k_tokens || 0
+          : pricing.cache_read_input_token_cost_above_200k_tokens ||
+            pricing.cache_read_input_token_cost ||
+            0
+        const has1h200k =
+          pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens !== null &&
+          pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens !== undefined
+        actualEphemeral1hPrice = has1h200k
+          ? pricing.cache_creation_input_token_cost_above_1hr_above_200k_tokens
+          : isClaudeModel
+            ? 0
+            : pricing.cache_creation_input_token_cost_above_1hr || 0
+      }
     } else {
       actualCacheCreatePrice = pricing.cache_creation_input_token_cost || 0
       actualCacheReadPrice = pricing.cache_read_input_token_cost || 0
