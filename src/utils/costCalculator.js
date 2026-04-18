@@ -80,10 +80,22 @@ class CostCalculator {
   }
 
   static isDetailedPricingRequest(usage, model = 'unknown') {
-    return (
+    if (
       (usage.cache_creation && typeof usage.cache_creation === 'object') ||
       (typeof model === 'string' && model.includes('[1m]'))
-    )
+    ) {
+      return true
+    }
+    // 有分档计费字段的模型（如 GPT-5.x above_272k）也需走 pricingService
+    const pricingData = pricingService.getModelPricing(model)
+    if (
+      pricingData &&
+      pricingData.input_cost_per_token_above_272k_tokens !== null &&
+      pricingData.input_cost_per_token_above_272k_tokens !== undefined
+    ) {
+      return true
+    }
+    return false
   }
 
   static isValidPricingServiceResult(result) {
