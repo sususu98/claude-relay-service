@@ -20,6 +20,7 @@ const {
   extractOpenAICacheReadTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
+const CodexCliValidator = require('../validators/clients/codexCliValidator')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
 const CODEX_CLI_INSTRUCTIONS =
@@ -316,11 +317,9 @@ const handleResponses = async (req, res) => {
       })
     }
 
-    // 判断是否为 Codex CLI 的请求（基于 User-Agent）
-    // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
+    // 判断是否为 Codex 客户端请求（基于 User-Agent）
     const userAgent = req.headers['user-agent'] || ''
-    const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec)\/[\d.]+/i
-    const isCodexCLI = codexCliPattern.test(userAgent)
+    const isCodexCLI = CodexCliValidator.isCodexUserAgent(userAgent)
 
     const standardResponsesRoute = isStandardResponsesRoute(req)
     const compactRoute = isCompactResponsesRoute(req)
