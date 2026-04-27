@@ -232,6 +232,35 @@ describe('openai responses payload toggles', () => {
     )
   })
 
+  test('keeps Codex Desktop standard responses payload unchanged', async () => {
+    const req = createReq({
+      userAgent:
+        'Codex Desktop/0.125.0-alpha.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.422.30944)',
+      body: {
+        model: 'gpt-5.5',
+        instructions:
+          'You are Codex, a coding agent based on GPT-5. You and the user share one workspace.',
+        temperature: 0.2,
+        prompt_cache_key: 'desktop-key'
+      }
+    })
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    expect(req.body).toEqual({
+      model: 'gpt-5.5',
+      instructions:
+        'You are Codex, a coding agent based on GPT-5. You and the user share one workspace.',
+      temperature: 0.2,
+      prompt_cache_key: 'desktop-key'
+    })
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      req.apiKey,
+      createHash('desktop-key'),
+      'gpt-5.5'
+    )
+  })
+
   test('applies payload rules directly on the original payload when adaptation is off', async () => {
     const req = createReq({
       body: {
