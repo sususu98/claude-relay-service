@@ -6,6 +6,26 @@ const { CLIENT_DEFINITIONS } = require('../clientDefinitions')
  * 验证请求是否来自 Codex CLI
  */
 class CodexCliValidator {
+  static getClientMatch(userAgent = '') {
+    const matchers = [
+      { type: 'codex_vscode', pattern: /^codex_vscode\/[\w.-]+/i, originators: ['codex_vscode'] },
+      { type: 'codex_cli_rs', pattern: /^codex_cli_rs\/[\w.-]+/i, originators: ['codex_cli_rs'] },
+      { type: 'codex_exec', pattern: /^codex_exec\/[\w.-]+/i, originators: ['codex_exec'] },
+      {
+        type: 'codex_tui',
+        pattern: /^codex[-_]tui\/[\w.-]+/i,
+        originators: ['codex-tui', 'codex_tui']
+      },
+      { type: 'codex_desktop', pattern: /^codex desktop\/[\w.-]+/i, originators: ['codex desktop'] }
+    ]
+
+    return matchers.find((matcher) => matcher.pattern.test(userAgent)) || null
+  }
+
+  static isCodexUserAgent(userAgent = '') {
+    return Boolean(this.getClientMatch(userAgent))
+  }
+
   /**
    * 获取客户端ID
    */
@@ -38,16 +58,9 @@ class CodexCliValidator {
       const originator = req.headers['originator'] || ''
       const sessionId = req.headers['session_id']
 
-      // 1. 基础 User-Agent 检查
-      // Codex CLI 的 UA 格式:
-      // - codex_vscode/0.35.0 (Windows 10.0.26100; x86_64) unknown (Cursor; 0.4.10)
-      // - codex_cli_rs/0.38.0 (Ubuntu 22.4.0; x86_64) WindowsTerminal
-      // - codex_exec/0.89.0 (Mac OS 26.2.0; arm64) xterm-256color (非交互式/脚本模式)
-      // - codex-tui/0.115.0 (Mac OS 26.2.0; arm64) iTerm.app/3.6.9 (codex-tui; 0.115.0)
-      const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec|codex[-_]tui)\/[\d.]+/i
-      const uaMatch = userAgent.match(codexCliPattern)
+      const clientMatch = this.getClientMatch(userAgent)
 
-      if (!uaMatch) {
+      if (!clientMatch) {
         logger.debug(`Codex CLI validation failed - UA mismatch: ${userAgent}`)
         return false
       }
@@ -65,10 +78,10 @@ class CodexCliValidator {
       }
 
       // 3. 验证 originator 头必须与 UA 中的客户端类型匹配
-      const clientType = uaMatch[1].toLowerCase()
-      if (originator.toLowerCase() !== clientType) {
+      const normalizedOriginator = originator.toLowerCase()
+      if (!clientMatch.originators.includes(normalizedOriginator)) {
         logger.debug(
-          `Codex CLI validation failed - originator mismatch. UA: ${clientType}, originator: ${originator}`
+          `Codex CLI validation failed - originator mismatch. UA: ${clientMatch.type}, originator: ${originator}`
         )
         return false
       }
@@ -89,11 +102,15 @@ class CodexCliValidator {
           return false
         }
 
-        const expectedPrefix =
-          'You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI'
-        if (!req.body.instructions.startsWith(expectedPrefix)) {
+        const expectedPrefixes = [
+          'You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI',
+          'You are Codex, a coding agent based on GPT-5.'
+        ]
+        if (!expectedPrefixes.some((prefix) => req.body.instructions.startsWith(prefix))) {
           logger.debug(`Codex CLI validation failed - invalid instructions prefix for ${req.path}`)
-          logger.debug(`Expected: "${expectedPrefix}..."`)
+          logger.debug(
+            `Expected one of: ${expectedPrefixes.map((prefix) => `"${prefix}..."`).join(', ')}`
+          )
           logger.debug(`Received: "${req.body.instructions.substring(0, 100)}..."`)
           return false
         }
