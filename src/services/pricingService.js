@@ -525,7 +525,7 @@ class PricingService {
   }
 
   // 计算使用费用
-  calculateCost(usage, modelName) {
+  calculateCost(usage, modelName, serviceTier = null) {
     const normalizedModelName = this.stripLongContextSuffix(modelName)
 
     // 检查是否为 1M 上下文模型（用户通过 [1m] 后缀主动选择长上下文模式）
@@ -697,6 +697,31 @@ class PricingService {
       actualCacheCreatePrice = pricing.cache_creation_input_token_cost || 0
       actualCacheReadPrice = pricing.cache_read_input_token_cost || 0
       actualEphemeral1hPrice = pricing.cache_creation_input_token_cost_above_1hr || 0
+    }
+
+    // OpenAI service_tier: "priority" 覆盖（GPT Fast 模式 / Priority 计费）
+    const usePriorityTier = serviceTier === 'priority' && pricing.supports_service_tier
+    if (usePriorityTier) {
+      if (useLongContextPricing && has272kPricing) {
+        actualInputPrice =
+          pricing.input_cost_per_token_above_272k_tokens_priority || actualInputPrice
+        actualOutputPrice =
+          pricing.output_cost_per_token_above_272k_tokens_priority || actualOutputPrice
+        actualCacheReadPrice =
+          pricing.cache_read_input_token_cost_above_272k_tokens_priority || actualCacheReadPrice
+        actualCacheCreatePrice =
+          pricing.cache_creation_input_token_cost_above_272k_tokens_priority ||
+          actualCacheCreatePrice
+      } else {
+        actualInputPrice = pricing.input_cost_per_token_priority || actualInputPrice
+        actualOutputPrice = pricing.output_cost_per_token_priority || actualOutputPrice
+        actualCacheReadPrice = pricing.cache_read_input_token_cost_priority || actualCacheReadPrice
+        actualCacheCreatePrice =
+          pricing.cache_creation_input_token_cost_priority || actualCacheCreatePrice
+      }
+      logger.info(
+        `💰 Priority tier pricing applied for ${modelName} (service_tier=${serviceTier})`
+      )
     }
 
     // Claude 兜底：pricing 字段缺失时用倍率从 actualInputPrice 推导
