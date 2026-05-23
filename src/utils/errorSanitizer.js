@@ -67,6 +67,14 @@ const ERROR_MATCHERS = [
 // 允许透传给客户端的错误模式（客户端可操作的错误，保留原始消息）
 const PASSTHROUGH_PATTERNS = [/prompt is too long/i, /too many tokens/i, /content.{0,20}too long/i]
 
+function containsCchSessionId(message) {
+  return typeof message === 'string' && /cch_session_id\s*:/i.test(message)
+}
+
+function stripCchSessionId(message) {
+  return String(message || '').replace(/\s*\(cch_session_id:[^)]*\)/gi, '')
+}
+
 /**
  * 根据原始错误匹配标准错误码
  * @param {Error|string|object} error - 原始错误
@@ -79,9 +87,14 @@ function mapToErrorCode(error, options = {}) {
   const { context = 'unknown', logOriginal = true } = options
 
   // 提取原始错误信息（含嵌套 JSON 中的 type）
-  const { message: originalMessage, type: upstreamErrorType } = extractErrorInfo(error)
-  const errorCode = error?.code || error?.response?.status
+  const {
+    message: originalMessage,
+    type: upstreamErrorType,
+    code: upstreamErrorCode
+  } = extractErrorInfo(error)
+  const errorCode = error?.code || upstreamErrorCode || error?.response?.status
   const statusCode = error?.response?.status || error?.status || error?.statusCode
+  const shouldPassthroughOriginalMessage = containsCchSessionId(originalMessage)
 
   // 记录原始错误到日志（供调试）
   if (logOriginal && originalMessage) {
@@ -114,15 +127,30 @@ function mapToErrorCode(error, options = {}) {
     }
   }
   if (upstreamErrorType === 'no_available_providers') {
-    // 清除内部 session ID，不暴露给客户端
-    const cleanMessage = (originalMessage || 'No available providers').replace(
-      /\s*\(cch_session_id:[^)]*\)/gi,
-      ''
-    )
     return {
       code: 'E006',
-      message: cleanMessage,
+      message: shouldPassthroughOriginalMessage
+        ? originalMessage || 'No available providers'
+        : stripCchSessionId(originalMessage || 'No available providers'),
       status: 503
+    }
+  }
+  if (upstreamErrorType === 'service_unavailable_error') {
+    return {
+      code: 'E001',
+      message: shouldPassthroughOriginalMessage
+        ? originalMessage || ERROR_CODES.E001.message
+        : ERROR_CODES.E001.message,
+      status: 503
+    }
+  }
+  if (String(upstreamErrorCode || '').toLowerCase() === 'http_408') {
+    return {
+      code: 'E008',
+      message: shouldPassthroughOriginalMessage
+        ? originalMessage || ERROR_CODES.E008.message
+        : ERROR_CODES.E008.message,
+      status: 504
     }
   }
 
@@ -169,6 +197,8 @@ function mapToErrorCode(error, options = {}) {
       matchedCode = 'E002'
     } else if (codeStr === 'ETIMEDOUT' || codeStr === 'ESOCKETTIMEDOUT') {
       matchedCode = 'E008'
+    } else if (codeStr === 'HTTP_408') {
+      matchedCode = 'E008'
     } else if (codeStr === 'ECONNABORTED') {
       matchedCode = 'E002'
     }
@@ -177,17 +207,18 @@ function mapToErrorCode(error, options = {}) {
   const result = ERROR_CODES[matchedCode]
   return {
     code: matchedCode,
-    message: result.message,
+    message:
+      shouldPassthroughOriginalMessage && originalMessage ? originalMessage : result.message,
     status: result.status
   }
 }
 
 /**
  * 提取原始错误信息（消息和错误类型）
- * @returns {{ message: string, type: string }}
+ * @returns {{ message: string, type: string, code: string }}
  */
 function extractErrorInfo(error) {
-  const result = { message: '', type: '' }
+  const result = { message: '', type: '', code: '' }
   if (!error) {
     return result
   }
@@ -197,6 +228,7 @@ function extractErrorInfo(error) {
   }
   // 提取直接可用的 type 字段
   result.type = error.error?.type || error.type || ''
+  result.code = error.error?.code || error.response?.data?.error?.code || ''
   if (error.message) {
     result.message = error.message
     return result
@@ -213,6 +245,9 @@ function extractErrorInfo(error) {
           // 从嵌套 JSON 中补充错误类型（外层无 type 时使用内层的）
           if (!result.type && parsed.error?.type) {
             result.type = parsed.error.type
+          }
+          if (!result.code && parsed.error?.code) {
+            result.code = parsed.error.code
           }
           return result
         }
