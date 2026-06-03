@@ -18,7 +18,7 @@ function createReq({
     },
     path: '/openai/responses',
     body: {
-      model: 'gpt-5-codex',
+      model: 'gpt-5.5',
       instructions
     }
   }
