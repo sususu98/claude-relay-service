@@ -442,7 +442,7 @@ describe('openai responses payload toggles', () => {
     })
   })
 
-  test('records the mutated service_tier for standard responses sent through openai accounts', async () => {
+  test('does not bill priority when service_tier is only injected by payload rules', async () => {
     unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
       accountId: 'openai-1',
       accountType: 'openai'
@@ -483,12 +483,13 @@ describe('openai responses payload toggles', () => {
 
     await openaiRoutes.handleResponses(req, createRes())
 
-    expect(req._serviceTier).toBe('priority')
+    expect(req.body.service_tier).toBe('priority')
+    expect(req._serviceTier).toBeNull()
     expect(apiKeyService.recordUsage).toHaveBeenCalled()
-    expect(apiKeyService.recordUsage.mock.calls[0][8]).toBe('priority')
+    expect(apiKeyService.recordUsage.mock.calls[0][8]).toBeNull()
   })
 
-  test('records null service_tier after Codex adaptation removes it for openai accounts', async () => {
+  test('bills priority when the client originally sent service_tier priority', async () => {
     unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
       accountId: 'openai-1',
       accountType: 'openai'
@@ -525,12 +526,12 @@ describe('openai responses payload toggles', () => {
     await openaiRoutes.handleResponses(req, createRes())
 
     expect(req.body.service_tier).toBeUndefined()
-    expect(req._serviceTier).toBeNull()
+    expect(req._serviceTier).toBe('priority')
     expect(apiKeyService.recordUsage).toHaveBeenCalled()
-    expect(apiKeyService.recordUsage.mock.calls[0][8]).toBeNull()
+    expect(apiKeyService.recordUsage.mock.calls[0][8]).toBe('priority')
   })
 
-  test('captures the post-rule service_tier before relaying openai-responses requests', async () => {
+  test('does not bill priority for relayed openai-responses requests when only payload rules add service_tier', async () => {
     const req = createReq({
       body: {
         model: 'gpt-4.1',
@@ -547,9 +548,10 @@ describe('openai responses payload toggles', () => {
 
     await openaiRoutes.handleResponses(req, createRes())
 
-    expect(req._serviceTier).toBe('priority')
+    expect(req.body.service_tier).toBe('priority')
+    expect(req._serviceTier).toBeNull()
     expect(openaiResponsesRelayService.handleRequest).toHaveBeenCalled()
-    expect(openaiResponsesRelayService.handleRequest.mock.calls[0][0]._serviceTier).toBe('priority')
+    expect(openaiResponsesRelayService.handleRequest.mock.calls[0][0]._serviceTier).toBeNull()
   })
 
   test('does not apply the new rule flow to compact responses routes', async () => {
