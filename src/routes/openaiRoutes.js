@@ -320,6 +320,7 @@ const handleResponses = async (req, res) => {
     // 判断是否为 Codex 客户端请求（基于 User-Agent）
     const userAgent = req.headers['user-agent'] || ''
     const isCodexCLI = CodexCliValidator.isCodexUserAgent(userAgent)
+    const clientServiceTier = req.body?.service_tier || null
 
     const standardResponsesRoute = isStandardResponsesRoute(req)
     const compactRoute = isCompactResponsesRoute(req)
@@ -358,8 +359,8 @@ const handleResponses = async (req, res) => {
       }
     }
 
-    // 从最终请求体中提取 service_tier，用于后续费用计算
-    req._serviceTier = req.body?.service_tier || null
+    // 上游不会可靠返回实际 service_tier，费用按客户端原始请求声明计算
+    req._serviceTier = clientServiceTier === 'priority' ? 'priority' : null
 
     // 从最终请求体中提取模型、会话 ID 和流式标志
     // NOTE: For some clients, prompt_cache_key is the only stable per-session key.
