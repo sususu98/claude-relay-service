@@ -1388,7 +1388,9 @@ class RedisClient {
     ephemeral5mTokens = 0,
     ephemeral1hTokens = 0,
     model = 'unknown',
-    isLongContextRequest = false
+    isLongContextRequest = false,
+    realCost = 0,
+    ratedCost = 0
   ) {
     const now = new Date()
     const today = getDateStringInTimezone(now)
@@ -1420,6 +1422,8 @@ class RedisClient {
     const finalCacheReadTokens = cacheReadTokens || 0
     const finalEphemeral5mTokens = ephemeral5mTokens || 0
     const finalEphemeral1hTokens = ephemeral1hTokens || 0
+    const realCostMicro = Math.round((Number(realCost) || 0) * 1000000)
+    const ratedCostMicro = Math.round((Number(ratedCost) || 0) * 1000000)
     const actualTotalTokens =
       finalInputTokens + finalOutputTokens + finalCacheCreateTokens + finalCacheReadTokens
     const coreTokens = finalInputTokens + finalOutputTokens
@@ -1561,6 +1565,22 @@ class RedisClient {
       this.client.del(`account_usage:model:daily:index:${today}:empty`)
     ]
 
+    if (realCostMicro > 0) {
+      operations.push(
+        this.client.hincrby(accountModelDaily, 'realCostMicro', realCostMicro),
+        this.client.hincrby(accountModelMonthly, 'realCostMicro', realCostMicro),
+        this.client.hincrby(accountModelHourly, 'realCostMicro', realCostMicro)
+      )
+    }
+
+    if (ratedCostMicro > 0) {
+      operations.push(
+        this.client.hincrby(accountModelDaily, 'ratedCostMicro', ratedCostMicro),
+        this.client.hincrby(accountModelMonthly, 'ratedCostMicro', ratedCostMicro),
+        this.client.hincrby(accountModelHourly, 'ratedCostMicro', ratedCostMicro)
+      )
+    }
+
     // 如果是 1M 上下文请求，添加额外的统计
     if (isLongContextRequest) {
       operations.push(
@@ -1574,6 +1594,71 @@ class RedisClient {
     }
 
     await Promise.all(operations)
+  }
+
+  _getStoredRealCostFromUsage(usage) {
+    if (!usage || typeof usage !== 'object') {
+      return null
+    }
+
+    if (Object.prototype.hasOwnProperty.call(usage, 'realCostMicro')) {
+      return (parseInt(usage.realCostMicro) || 0) / 1000000
+    }
+
+    // ratedCost 可能包含用户侧倍率，不用于 provider/account quota 成本。
+    if (Object.prototype.hasOwnProperty.call(usage, 'ratedCostMicro')) {
+      return 0
+    }
+
+    return null
+  }
+
+  _calculateConservativeAccountCost(usage, model, CostCalculator) {
+    const costResult = CostCalculator.calculateCost(usage, model)
+    if (costResult?.debug?.isLongContextRequest !== true) {
+      return costResult?.costs?.total || 0
+    }
+
+    const pricingService = require('../services/pricingService')
+    const pricing = pricingService.getModelPricing(model)
+    if (!pricing) {
+      return 0
+    }
+
+    const inputTokens = parseInt(usage.input_tokens || 0)
+    const outputTokens = parseInt(usage.output_tokens || 0)
+    const cacheCreateTokens = parseInt(usage.cache_creation_input_tokens || 0)
+    const cacheReadTokens = parseInt(usage.cache_read_input_tokens || 0)
+
+    const inputPrice = pricing.input_cost_per_token || 0
+    const outputPrice = pricing.output_cost_per_token || 0
+    const cacheReadPrice = pricing.cache_read_input_token_cost || 0
+    let cacheCreatePrice = pricing.cache_creation_input_token_cost || 0
+
+    if (
+      CostCalculator.isOpenAIModel?.(model, pricing) &&
+      !cacheCreatePrice &&
+      cacheCreateTokens > 0
+    ) {
+      cacheCreatePrice = inputPrice
+    }
+
+    let cacheCreateCost = cacheCreateTokens * cacheCreatePrice
+    const ephemeral1hTokens = parseInt(usage.cache_creation?.ephemeral_1h_input_tokens || 0)
+    if (ephemeral1hTokens > 0) {
+      const ephemeral5mTokens = parseInt(usage.cache_creation?.ephemeral_5m_input_tokens || 0)
+      const fallback5mTokens = Math.max(0, cacheCreateTokens - ephemeral1hTokens)
+      const actual5mTokens = ephemeral5mTokens || fallback5mTokens
+      const oneHourPrice = pricing.cache_creation_input_token_cost_above_1hr || cacheCreatePrice
+      cacheCreateCost = actual5mTokens * cacheCreatePrice + ephemeral1hTokens * oneHourPrice
+    }
+
+    return (
+      inputTokens * inputPrice +
+      outputTokens * outputPrice +
+      cacheCreateCost +
+      cacheReadTokens * cacheReadPrice
+    )
   }
 
   /**
@@ -1987,6 +2072,15 @@ class RedisClient {
       const [err, modelUsage] = results[i]
 
       if (!err && modelUsage && (modelUsage.inputTokens || modelUsage.outputTokens)) {
+        const storedCost = this._getStoredRealCostFromUsage(modelUsage)
+        if (storedCost !== null) {
+          totalCost += storedCost
+          logger.debug(
+            `💰 Account ${accountId} daily stored cost for model ${model}: $${storedCost}`
+          )
+          continue
+        }
+
         const usage = {
           input_tokens: parseInt(modelUsage.inputTokens || 0),
           output_tokens: parseInt(modelUsage.outputTokens || 0),
@@ -2004,12 +2098,10 @@ class RedisClient {
           }
         }
 
-        const costResult = CostCalculator.calculateCost(usage, model)
-        totalCost += costResult.costs.total
+        const cost = this._calculateConservativeAccountCost(usage, model, CostCalculator)
+        totalCost += cost
 
-        logger.debug(
-          `💰 Account ${accountId} daily cost for model ${model}: $${costResult.costs.total}`
-        )
+        logger.debug(`💰 Account ${accountId} daily cost for model ${model}: $${cost}`)
       }
     }
 
@@ -2085,6 +2177,12 @@ class RedisClient {
       const [err, modelUsage] = results[i]
 
       if (!err && modelUsage && (modelUsage.inputTokens || modelUsage.outputTokens)) {
+        const storedCost = this._getStoredRealCostFromUsage(modelUsage)
+        if (storedCost !== null) {
+          costMap.set(accountId, costMap.get(accountId) + storedCost)
+          continue
+        }
+
         const usage = {
           input_tokens: parseInt(modelUsage.inputTokens || 0),
           output_tokens: parseInt(modelUsage.outputTokens || 0),
@@ -2102,8 +2200,8 @@ class RedisClient {
           }
         }
 
-        const costResult = CostCalculator.calculateCost(usage, model)
-        costMap.set(accountId, costMap.get(accountId) + costResult.costs.total)
+        const cost = this._calculateConservativeAccountCost(usage, model, CostCalculator)
+        costMap.set(accountId, costMap.get(accountId) + cost)
       }
     }
 
@@ -2133,10 +2231,20 @@ class RedisClient {
         continue
       }
 
-      const parts = key.split(':')
-      const model = parts[4]
+      const prefix = `account_usage:model:daily:${accountId}:`
+      const suffix = `:${today}`
+      const model =
+        key.startsWith(prefix) && key.endsWith(suffix)
+          ? key.slice(prefix.length, -suffix.length)
+          : key.split(':')[4]
 
       if (modelUsage.inputTokens || modelUsage.outputTokens) {
+        const storedCost = this._getStoredRealCostFromUsage(modelUsage)
+        if (storedCost !== null) {
+          totalCost += storedCost
+          continue
+        }
+
         const usage = {
           input_tokens: parseInt(modelUsage.inputTokens || 0),
           output_tokens: parseInt(modelUsage.outputTokens || 0),
@@ -2154,8 +2262,8 @@ class RedisClient {
           }
         }
 
-        const costResult = CostCalculator.calculateCost(usage, model)
-        totalCost += costResult.costs.total
+        const cost = this._calculateConservativeAccountCost(usage, model, CostCalculator)
+        totalCost += cost
       }
     }
 

@@ -183,7 +183,11 @@ const serviceStats = computed(() => {
           ? model.costs.rated
           : modelRealCost * globalRate * keyRate
       stats[service].ratedCost += modelRatedCost
-      if (!stats[service].pricing && model.pricing) {
+      if (
+        !stats[service].pricing &&
+        model.storedCostBreakdownAvailable !== false &&
+        model.pricing
+      ) {
         stats[service].pricing = model.pricing
       }
     }
