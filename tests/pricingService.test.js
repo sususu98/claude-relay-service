@@ -79,6 +79,51 @@ describe('PricingService - Long Context Pricing', () => {
   })
 
   describe('Claude 模型平坦计费（无 200K+ 加价）', () => {
+    it('从缓存加载价格时应应用 local_pricing.json 覆盖', async () => {
+      const cachedPricing = {
+        'gpt-5.5-fast': {
+          input_cost_per_token: 0.000005,
+          cache_read_input_token_cost: 0.0000005,
+          output_cost_per_token: 0.00003
+        }
+      }
+      const localPricing = {
+        'gpt-5.5-fast': {
+          input_cost_per_token: 0.0000125,
+          cache_read_input_token_cost: 0.00000125,
+          output_cost_per_token: 0.000075
+        }
+      }
+
+      pricingService.cleanup()
+      jest.resetModules()
+      const mockedFs = require('fs')
+      mockedFs.existsSync.mockImplementation((filePath) => {
+        const normalizedPath = String(filePath)
+        return (
+          normalizedPath.endsWith('data/model_pricing.json') ||
+          normalizedPath.endsWith('data/local_pricing.json')
+        )
+      })
+      mockedFs.readFileSync.mockImplementation((filePath) => {
+        const normalizedPath = String(filePath)
+        if (normalizedPath.endsWith('data/local_pricing.json')) {
+          return JSON.stringify(localPricing)
+        }
+        if (normalizedPath.endsWith('data/model_pricing.json')) {
+          return JSON.stringify(cachedPricing)
+        }
+        return JSON.stringify(cachedPricing)
+      })
+      mockedFs.statSync.mockReturnValue({ mtime: new Date(), mtimeMs: Date.now() })
+
+      pricingService = require('../src/services/pricingService')
+
+      await pricingService.loadPricingData()
+
+      expect(pricingService.pricingData['gpt-5.5-fast']).toEqual(localPricing['gpt-5.5-fast'])
+    })
+
     it('199999 tokens - 应使用基础价格', () => {
       const usage = {
         input_tokens: 199999,

@@ -296,6 +296,7 @@ class PricingService {
       if (fs.existsSync(this.pricingFile)) {
         const data = fs.readFileSync(this.pricingFile, 'utf8')
         this.pricingData = JSON.parse(data)
+        this.applyLocalPricing()
 
         const stats = fs.statSync(this.pricingFile)
         this.lastUpdated = stats.mtime
@@ -719,9 +720,7 @@ class PricingService {
         actualCacheCreatePrice =
           pricing.cache_creation_input_token_cost_priority || actualCacheCreatePrice
       }
-      logger.info(
-        `💰 Priority tier pricing applied for ${modelName} (service_tier=${serviceTier})`
-      )
+      logger.info(`💰 Priority tier pricing applied for ${modelName} (service_tier=${serviceTier})`)
     }
 
     // Claude 兜底：pricing 字段缺失时用倍率从 actualInputPrice 推导

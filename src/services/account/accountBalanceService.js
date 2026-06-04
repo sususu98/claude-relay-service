@@ -528,7 +528,7 @@ class AccountBalanceService {
 
     try {
       const usageStats = await this.redis.getAccountUsageStats(accountId)
-      const dailyCost = safeNumber(usageStats?.daily?.cost || 0)
+      const dailyCost = await this._computeDailyCost(accountId)
       const monthlyCost = await this._computeMonthlyCost(accountId)
       const totalCost = await this._computeTotalCost(accountId)
 
@@ -551,6 +551,14 @@ class AccountBalanceService {
         monthlyRequests: 0
       }
     }
+  }
+
+  async _computeDailyCost(accountId) {
+    const today = this.redis.getDateStringInTimezone
+      ? this.redis.getDateStringInTimezone(new Date())
+      : this._getDateStringInTimezone(new Date())
+    const pattern = `account_usage:model:daily:${accountId}:*:${today}`
+    return await this._sumModelCostsByKeysPattern(pattern)
   }
 
   async _computeMonthlyCost(accountId) {
@@ -597,8 +605,13 @@ class AccountBalanceService {
             continue
           }
 
-          const parts = String(keys[i]).split(':')
-          const model = parts[4] || 'unknown'
+          const key = String(keys[i])
+          const model = this._extractModelFromAccountUsageKey(key) || 'unknown'
+          const storedCost = this._getStoredRealCostFromUsage(data)
+          if (storedCost !== null) {
+            totalCost += storedCost
+            continue
+          }
 
           const usage = {
             input_tokens: parseInt(data.inputTokens || 0),
@@ -617,8 +630,7 @@ class AccountBalanceService {
             }
           }
 
-          const costResult = CostCalculator.calculateCost(usage, model)
-          totalCost += costResult.costs.total || 0
+          totalCost += this._calculateConservativeAccountCost(usage, model)
         }
 
         if (iterations >= maxIterations) {
@@ -632,6 +644,89 @@ class AccountBalanceService {
       this.logger.debug(`汇总模型费用失败: ${pattern}`, error)
       return 0
     }
+  }
+
+  _getDateStringInTimezone(date = new Date()) {
+    const tzDate = this.redis.getDateInTimezone
+      ? this.redis.getDateInTimezone(date)
+      : new Date(date.getTime())
+    return `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(
+      2,
+      '0'
+    )}-${String(tzDate.getUTCDate()).padStart(2, '0')}`
+  }
+
+  _extractModelFromAccountUsageKey(key) {
+    const parts = String(key).split(':')
+    if (parts.length < 6 || parts[0] !== 'account_usage' || parts[1] !== 'model') {
+      return null
+    }
+
+    return parts.slice(4, -1).join(':')
+  }
+
+  _getStoredRealCostFromUsage(usage) {
+    if (!usage || typeof usage !== 'object') {
+      return null
+    }
+
+    if (Object.prototype.hasOwnProperty.call(usage, 'realCostMicro')) {
+      return (parseInt(usage.realCostMicro) || 0) / 1000000
+    }
+
+    if (Object.prototype.hasOwnProperty.call(usage, 'ratedCostMicro')) {
+      return 0
+    }
+
+    return null
+  }
+
+  _calculateConservativeAccountCost(usage, model) {
+    const costResult = CostCalculator.calculateCost(usage, model)
+    if (costResult?.debug?.isLongContextRequest !== true) {
+      return costResult?.costs?.total || 0
+    }
+
+    const pricingService = require('../pricingService')
+    const pricing = pricingService.getModelPricing(model)
+    if (!pricing) {
+      return 0
+    }
+
+    const inputTokens = parseInt(usage.input_tokens || 0)
+    const outputTokens = parseInt(usage.output_tokens || 0)
+    const cacheCreateTokens = parseInt(usage.cache_creation_input_tokens || 0)
+    const cacheReadTokens = parseInt(usage.cache_read_input_tokens || 0)
+
+    const inputPrice = pricing.input_cost_per_token || 0
+    const outputPrice = pricing.output_cost_per_token || 0
+    const cacheReadPrice = pricing.cache_read_input_token_cost || 0
+    let cacheCreatePrice = pricing.cache_creation_input_token_cost || 0
+
+    if (
+      CostCalculator.isOpenAIModel?.(model, pricing) &&
+      !cacheCreatePrice &&
+      cacheCreateTokens > 0
+    ) {
+      cacheCreatePrice = inputPrice
+    }
+
+    let cacheCreateCost = cacheCreateTokens * cacheCreatePrice
+    const ephemeral1hTokens = parseInt(usage.cache_creation?.ephemeral_1h_input_tokens || 0)
+    if (ephemeral1hTokens > 0) {
+      const ephemeral5mTokens = parseInt(usage.cache_creation?.ephemeral_5m_input_tokens || 0)
+      const fallback5mTokens = Math.max(0, cacheCreateTokens - ephemeral1hTokens)
+      const actual5mTokens = ephemeral5mTokens || fallback5mTokens
+      const oneHourPrice = pricing.cache_creation_input_token_cost_above_1hr || cacheCreatePrice
+      cacheCreateCost = actual5mTokens * cacheCreatePrice + ephemeral1hTokens * oneHourPrice
+    }
+
+    return (
+      inputTokens * inputPrice +
+      outputTokens * outputPrice +
+      cacheCreateCost +
+      cacheReadTokens * cacheReadPrice
+    )
   }
 
   _buildQuotaFromLocal(account, statistics) {

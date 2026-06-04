@@ -1,4 +1,15 @@
 // Mock logger，避免测试输出污染控制台
+jest.mock(
+  '../config/config',
+  () => ({
+    system: {
+      timezoneOffset: 8
+    },
+    redis: {}
+  }),
+  { virtual: true }
+)
+
 jest.mock('../src/utils/logger', () => ({
   debug: jest.fn(),
   info: jest.fn(),
@@ -6,7 +17,23 @@ jest.mock('../src/utils/logger', () => ({
   error: jest.fn()
 }))
 
+jest.mock('../src/utils/costCalculator', () => ({
+  calculateCost: jest.fn(() => ({
+    costs: { total: 0 },
+    debug: { isLongContextRequest: false }
+  })),
+  isOpenAIModel: jest.fn((model, pricing) => {
+    return String(model).includes('gpt') || pricing?.litellm_provider === 'openai'
+  })
+}))
+
+jest.mock('../src/services/pricingService', () => ({
+  getModelPricing: jest.fn()
+}))
+
 const accountBalanceServiceModule = require('../src/services/account/accountBalanceService')
+const CostCalculator = require('../src/utils/costCalculator')
+const pricingService = require('../src/services/pricingService')
 
 const { AccountBalanceService } = accountBalanceServiceModule
 
@@ -40,7 +67,17 @@ describe('AccountBalanceService', () => {
       daily: { requests: 2, cost: 20 },
       monthly: { requests: 5 }
     }),
-    getDateInTimezone: (date) => new Date(date.getTime() + 8 * 3600 * 1000)
+    getDateInTimezone: (date) => new Date(date.getTime() + 8 * 3600 * 1000),
+    getDateStringInTimezone: () => '2026-06-04'
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    CostCalculator.calculateCost.mockReturnValue({
+      costs: { total: 0 },
+      debug: { isLongContextRequest: false }
+    })
+    pricingService.getModelPricing.mockReset()
   })
 
   it('should normalize platform aliases', () => {
@@ -56,6 +93,7 @@ describe('AccountBalanceService', () => {
 
     service._computeMonthlyCost = jest.fn().mockResolvedValue(30)
     service._computeTotalCost = jest.fn().mockResolvedValue(123.45)
+    service._computeDailyCost = jest.fn().mockResolvedValue(20)
 
     const account = { id: 'acct-1', name: 'A', dailyQuota: '100', quotaResetTime: '00:00' }
     const result = await service._getAccountBalanceForAccount(account, 'claude-console', {
@@ -84,6 +122,7 @@ describe('AccountBalanceService', () => {
     })
 
     const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
+    service._computeDailyCost = jest.fn().mockResolvedValue(0)
     service._computeMonthlyCost = jest.fn().mockResolvedValue(0)
     service._computeTotalCost = jest.fn().mockResolvedValue(0)
 
@@ -102,6 +141,7 @@ describe('AccountBalanceService', () => {
     const mockRedis = buildMockRedis()
     const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
 
+    service._computeDailyCost = jest.fn().mockResolvedValue(0)
     service._computeMonthlyCost = jest.fn().mockResolvedValue(0)
     service._computeTotalCost = jest.fn().mockResolvedValue(0)
 
@@ -132,6 +172,7 @@ describe('AccountBalanceService', () => {
     })
 
     const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
+    service._computeDailyCost = jest.fn().mockResolvedValue(0)
     service._computeMonthlyCost = jest.fn().mockResolvedValue(0)
     service._computeTotalCost = jest.fn().mockResolvedValue(0)
 
@@ -160,6 +201,7 @@ describe('AccountBalanceService', () => {
     })
 
     const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
+    service._computeDailyCost = jest.fn().mockResolvedValue(0)
     service._computeMonthlyCost = jest.fn().mockResolvedValue(0)
     service._computeTotalCost = jest.fn().mockResolvedValue(0)
 
@@ -214,5 +256,84 @@ describe('AccountBalanceService', () => {
     const summary = await service.getBalanceSummary()
     expect(summary.lowBalanceCount).toBe(1)
     expect(summary.platforms['claude-console'].lowBalanceCount).toBe(1)
+  })
+
+  it('should use stored real cost for provider local model costs', async () => {
+    const pipeline = {
+      hgetall: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue([
+        [
+          null,
+          {
+            inputTokens: '1000000',
+            outputTokens: '100000',
+            realCostMicro: '1234567',
+            ratedCostMicro: '2345678'
+          }
+        ]
+      ])
+    }
+    const mockRedis = {
+      ...buildMockRedis(),
+      getClientSafe: jest.fn(() => ({
+        scan: jest
+          .fn()
+          .mockResolvedValueOnce([
+            '0',
+            ['account_usage:model:daily:acct-1:gpt-5.5:2026-06-04']
+          ]),
+        pipeline: jest.fn(() => pipeline)
+      }))
+    }
+    const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
+
+    const result = await service._computeDailyCost('acct-1')
+
+    expect(result).toBe(1.234567)
+    expect(CostCalculator.calculateCost).not.toHaveBeenCalled()
+  })
+
+  it('should use base pricing for provider legacy aggregate long-context fallback', async () => {
+    CostCalculator.calculateCost.mockReturnValueOnce({
+      costs: { total: 10 },
+      debug: { isLongContextRequest: true }
+    })
+    pricingService.getModelPricing.mockReturnValue({
+      input_cost_per_token: 0.000005,
+      output_cost_per_token: 0.00003,
+      cache_read_input_token_cost: 0.0000005,
+      litellm_provider: 'openai'
+    })
+    const pipeline = {
+      hgetall: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue([
+        [
+          null,
+          {
+            inputTokens: '300000',
+            outputTokens: '1000',
+            cacheReadTokens: '1000000'
+          }
+        ]
+      ])
+    }
+    const mockRedis = {
+      ...buildMockRedis(),
+      getClientSafe: jest.fn(() => ({
+        scan: jest
+          .fn()
+          .mockResolvedValueOnce([
+            '0',
+            ['account_usage:model:daily:acct-1:gpt-5.5:2026-06-04']
+          ]),
+        pipeline: jest.fn(() => pipeline)
+      }))
+    }
+    const service = new AccountBalanceService({ redis: mockRedis, logger: mockLogger })
+
+    const result = await service._computeDailyCost('acct-1')
+
+    expect(result).toBeCloseTo(2.03, 10)
+    expect(CostCalculator.calculateCost).toHaveBeenCalled()
   })
 })

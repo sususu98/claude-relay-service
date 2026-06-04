@@ -402,6 +402,7 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
 
     // 收集所有需要扫描的日期
     const datePatterns = []
+    const storedCostPatterns = []
 
     if (startDate && endDate) {
       // 自定义日期范围
@@ -421,6 +422,7 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
       while (currentDate <= end) {
         const dateStr = redis.getDateStringInTimezone(currentDate)
         datePatterns.push({ dateStr, pattern: `usage:model:daily:*:${dateStr}` })
+        storedCostPatterns.push({ dateStr, pattern: `usage:*:model:daily:*:${dateStr}` })
         currentDate.setDate(currentDate.getDate() + 1)
       }
 
@@ -431,7 +433,15 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         period === 'daily'
           ? `usage:model:daily:*:${today}`
           : `usage:model:monthly:*:${currentMonth}`
+      const storedCostPattern =
+        period === 'daily'
+          ? `usage:*:model:daily:*:${today}`
+          : `usage:*:model:monthly:*:${currentMonth}`
       datePatterns.push({ dateStr: period === 'daily' ? today : currentMonth, pattern })
+      storedCostPatterns.push({
+        dateStr: period === 'daily' ? today : currentMonth,
+        pattern: storedCostPattern
+      })
     }
 
     // 按日期集合扫描，串行避免并行触发多次全库 SCAN
@@ -459,6 +469,45 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
 
       return model.replace(/-v\d+:\d+$|:latest$/, '')
     }
+
+    // API Key 级别的模型统计保存了请求时已计算的费用；全局模型统计只有 token。
+    // 优先使用已存费用，避免把聚合 token 按当前价格或长上下文阈值重新计费。
+    const storedCostMap = new Map()
+    let storedCostKeyCount = 0
+    for (const { pattern } of storedCostPatterns) {
+      const results = await redis.scanAndGetAllChunked(pattern)
+      storedCostKeyCount += results.length
+
+      for (const { key, data } of results) {
+        const match =
+          key.match(/^usage:(.+):model:daily:(.+):\d{4}-\d{2}-\d{2}$/) ||
+          key.match(/^usage:(.+):model:monthly:(.+):\d{4}-\d{2}$/)
+
+        if (!match || !data || Object.keys(data).length === 0) {
+          continue
+        }
+
+        if (!('realCostMicro' in data) && !('ratedCostMicro' in data)) {
+          continue
+        }
+
+        const normalizedModel = normalizeModelName(match[2])
+        const storedCost = storedCostMap.get(normalizedModel) || {
+          realCostMicro: 0,
+          ratedCostMicro: 0,
+          hasStoredCost: false
+        }
+
+        storedCost.realCostMicro += parseInt(data.realCostMicro) || 0
+        storedCost.ratedCostMicro += parseInt(data.ratedCostMicro) || 0
+        storedCost.hasStoredCost = true
+        storedCostMap.set(normalizedModel, storedCost)
+      }
+    }
+
+    logger.info(
+      `📊 Found ${storedCostKeyCount} API-key model cost keys, ${storedCostMap.size} models with stored cost`
+    )
 
     // 聚合相同模型的数据
     const modelStatsMap = new Map()
@@ -523,6 +572,35 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
 
       // 计算费用
       const costData = CostCalculator.calculateCost(usage, model)
+      const storedCost = storedCostMap.get(model)
+      const hasStoredCost = storedCost?.hasStoredCost === true
+
+      if (hasStoredCost) {
+        const realCost = (storedCost.realCostMicro || 0) / 1000000
+        const ratedCost = (storedCost.ratedCostMicro || 0) / 1000000
+        costData.costs.input = 0
+        costData.costs.output = 0
+        costData.costs.cacheCreate = 0
+        costData.costs.cacheWrite = 0
+        costData.costs.cacheRead = 0
+        costData.costs.ephemeral5m = 0
+        costData.costs.ephemeral1h = 0
+        costData.costs.real = realCost
+        costData.costs.rated = ratedCost
+        costData.costs.total = realCost
+        costData.formatted.input = CostCalculator.formatCost(0)
+        costData.formatted.output = CostCalculator.formatCost(0)
+        costData.formatted.cacheCreate = CostCalculator.formatCost(0)
+        costData.formatted.cacheWrite = CostCalculator.formatCost(0)
+        costData.formatted.cacheRead = CostCalculator.formatCost(0)
+        costData.formatted.ephemeral5m = CostCalculator.formatCost(0)
+        costData.formatted.ephemeral1h = CostCalculator.formatCost(0)
+        costData.formatted.total = CostCalculator.formatCost(realCost)
+        costData.formatted.real = CostCalculator.formatCost(realCost)
+        costData.formatted.rated = CostCalculator.formatCost(ratedCost)
+        costData.usingStoredCost = true
+        costData.storedCostBreakdownAvailable = false
+      }
 
       modelStats.push({
         model,
@@ -547,7 +625,10 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         },
         costs: costData.costs,
         formatted: costData.formatted,
-        pricing: costData.pricing
+        pricing: costData.pricing,
+        usingStoredCost: hasStoredCost,
+        storedCostBreakdownAvailable: costData.storedCostBreakdownAvailable !== false,
+        isLegacy: !hasStoredCost
       })
     }
 
