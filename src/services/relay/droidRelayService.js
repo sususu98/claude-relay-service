@@ -9,7 +9,11 @@ const { updateRateLimitCounters } = require('../../utils/rateLimitHelper')
 const logger = require('../../utils/logger')
 const runtimeAddon = require('../../utils/runtimeAddon')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
-const { createRequestDetailMeta } = require('../../utils/requestDetailHelper')
+const {
+  createRequestDetailMeta,
+  extractOpenAICacheReadTokens,
+  extractOpenAICacheWriteTokens
+} = require('../../utils/requestDetailHelper')
 
 const SYSTEM_PROMPT = 'You are Droid, an AI software engineering agent built by Factory.'
 const RUNTIME_EVENT_FMT_PAYLOAD = 'fmtPayload'
@@ -787,13 +791,16 @@ class DroidRelayService {
                 currentUsageData.output_tokens = 0
               }
 
-              // Capture cache tokens from OpenAI format
-              currentUsageData.cache_read_input_tokens =
-                data.usage.input_tokens_details?.cached_tokens || 0
-              currentUsageData.cache_creation_input_tokens =
-                data.usage.input_tokens_details?.cache_creation_input_tokens ||
-                data.usage.cache_creation_input_tokens ||
-                0
+              // Capture cache tokens from OpenAI format (incl. GPT-5.6 cache_write_tokens)
+              // OpenAI input_tokens already includes read/write subsets; peel them for separate pricing.
+              const cacheReadTokens = extractOpenAICacheReadTokens(data.usage)
+              const cacheCreateTokens = extractOpenAICacheWriteTokens(data.usage)
+              currentUsageData.cache_read_input_tokens = cacheReadTokens
+              currentUsageData.cache_creation_input_tokens = cacheCreateTokens
+              currentUsageData.input_tokens = Math.max(
+                0,
+                (currentUsageData.input_tokens || 0) - cacheReadTokens - cacheCreateTokens
+              )
 
               logger.debug('📊 Droid OpenAI usage:', currentUsageData)
             }
@@ -816,13 +823,16 @@ class DroidRelayService {
                 currentUsageData.output_tokens = 0
               }
 
-              // Capture cache tokens from OpenAI Response API format
-              currentUsageData.cache_read_input_tokens =
-                usage.input_tokens_details?.cached_tokens || 0
-              currentUsageData.cache_creation_input_tokens =
-                usage.input_tokens_details?.cache_creation_input_tokens ||
-                usage.cache_creation_input_tokens ||
-                0
+              // Capture cache tokens from OpenAI Response API format (incl. GPT-5.6 write)
+              // OpenAI input_tokens already includes read/write subsets; peel them for separate pricing.
+              const cacheReadTokens = extractOpenAICacheReadTokens(usage)
+              const cacheCreateTokens = extractOpenAICacheWriteTokens(usage)
+              currentUsageData.cache_read_input_tokens = cacheReadTokens
+              currentUsageData.cache_creation_input_tokens = cacheCreateTokens
+              currentUsageData.input_tokens = Math.max(
+                0,
+                (currentUsageData.input_tokens || 0) - cacheReadTokens - cacheCreateTokens
+              )
 
               logger.debug('📊 Droid OpenAI response usage:', currentUsageData)
             }
@@ -924,13 +934,20 @@ class DroidRelayService {
     const cacheReadTokens = toNumber(
       usageData.cache_read_input_tokens ??
         usageData.cacheReadTokens ??
-        usageData.input_tokens_details?.cached_tokens
+        usageData.input_tokens_details?.cached_tokens ??
+        usageData.prompt_tokens_details?.cached_tokens
     )
 
     const rawCacheCreateTokens =
       usageData.cache_creation_input_tokens ??
       usageData.cacheCreateTokens ??
       usageData.cache_tokens ??
+      usageData.cache_write_tokens ??
+      usageData.input_tokens_details?.cache_write_tokens ??
+      usageData.prompt_tokens_details?.cache_write_tokens ??
+      usageData.input_tokens_details?.cache_creation_input_tokens ??
+      usageData.input_tokens_details?.cache_creation_tokens ??
+      usageData.prompt_tokens_details?.cache_creation_tokens ??
       0
     let cacheCreateTokens = toNumber(rawCacheCreateTokens)
 
@@ -945,8 +962,20 @@ class DroidRelayService {
       cacheCreateTokens = ephemeral5m + ephemeral1h
     }
 
+    // OpenAI-style usage counts cache read/write inside prompt/input tokens.
+    const looksLikeOpenAIInclusiveInput =
+      usageData.prompt_tokens !== undefined ||
+      usageData.completion_tokens !== undefined ||
+      usageData.input_tokens_details !== undefined ||
+      usageData.prompt_tokens_details !== undefined ||
+      usageData.cache_write_tokens !== undefined
+
+    const actualInputTokens = looksLikeOpenAIInclusiveInput
+      ? Math.max(0, inputTokens - cacheReadTokens - cacheCreateTokens)
+      : inputTokens
+
     const normalized = {
-      input_tokens: inputTokens,
+      input_tokens: actualInputTokens,
       output_tokens: outputTokens,
       cache_creation_input_tokens: cacheCreateTokens,
       cache_read_input_tokens: cacheReadTokens

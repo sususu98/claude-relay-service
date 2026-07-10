@@ -604,30 +604,127 @@ function finalizeRequestDetailMeta(requestMeta = null) {
   }
 }
 
+function toNonNegativeTokenCount(value) {
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  if (Number.isNaN(parsed)) {
+    return null
+  }
+
+  return Math.max(0, parsed)
+}
+
+function firstNonNegativeTokenCount(candidates = []) {
+  for (const value of candidates) {
+    const parsed = toNonNegativeTokenCount(value)
+    if (parsed !== null) {
+      return parsed
+    }
+  }
+
+  return 0
+}
+
+// OpenAI Responses: input_tokens_details; Chat Completions: prompt_tokens_details.
+function getOpenAITokenDetails(usage = {}) {
+  if (!usage || typeof usage !== 'object') {
+    return null
+  }
+
+  if (usage.input_tokens_details && typeof usage.input_tokens_details === 'object') {
+    return usage.input_tokens_details
+  }
+
+  if (usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object') {
+    return usage.prompt_tokens_details
+  }
+
+  return null
+}
+
 function extractOpenAICacheReadTokens(usage = {}) {
   if (!usage || typeof usage !== 'object') {
     return 0
   }
 
-  const candidates = [
-    usage.input_tokens_details?.cached_tokens,
-    usage.input_tokens_details?.cached_token,
-    usage.prompt_tokens_details?.cached_tokens,
-    usage.prompt_tokens_details?.cached_token
-  ]
+  const details = getOpenAITokenDetails(usage)
+  if (details) {
+    // Details block is authoritative when present (matches upstream Responses/Chat shapes).
+    return firstNonNegativeTokenCount([details.cached_tokens, details.cached_token])
+  }
 
-  for (const value of candidates) {
-    if (value === undefined || value === null || value === '') {
-      continue
-    }
+  return firstNonNegativeTokenCount([usage.cache_read_input_tokens, usage.cacheReadTokens])
+}
 
-    const parsed = Number(value)
-    if (!Number.isNaN(parsed)) {
-      return Math.max(0, parsed)
+// GPT-5.6 Responses reports cache_write_tokens inside input_tokens_details (may be 0).
+// Chat Completions currently omits write fields entirely.
+function extractOpenAICacheWriteTokens(usage = {}) {
+  if (!usage || typeof usage !== 'object') {
+    return 0
+  }
+
+  const details = getOpenAITokenDetails(usage)
+  if (details) {
+    // Stay inside the details object so a present cache_write_tokens:0 is trusted.
+    // Only fall back to legacy aliases when write key is absent (Chat / older gateways).
+    return firstNonNegativeTokenCount([
+      details.cache_write_tokens,
+      details.cache_creation_tokens,
+      details.cache_creation_input_tokens
+    ])
+  }
+
+  return firstNonNegativeTokenCount([
+    usage.cache_write_tokens,
+    usage.cache_creation_tokens,
+    usage.cache_creation_input_tokens,
+    usage.cacheCreateTokens
+  ])
+}
+
+// Observed upstream: total_tokens = input_tokens + output_tokens.
+// cached_tokens / cache_write_tokens are subsets of input_tokens, not extra billable input.
+function extractOpenAIUsageTokens(usage = {}) {
+  if (!usage || typeof usage !== 'object') {
+    return {
+      totalInputTokens: 0,
+      actualInputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0
     }
   }
 
-  return 0
+  const totalInputTokens = firstNonNegativeTokenCount([
+    usage.input_tokens,
+    usage.prompt_tokens,
+    usage.inputTokens
+  ])
+  const outputTokens = firstNonNegativeTokenCount([
+    usage.output_tokens,
+    usage.completion_tokens,
+    usage.outputTokens
+  ])
+  const cacheReadTokens = extractOpenAICacheReadTokens(usage)
+  const cacheCreateTokens = extractOpenAICacheWriteTokens(usage)
+
+  // Defensive clamp: never let bad upstream detail math create negative uncached input.
+  const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens - cacheCreateTokens)
+  const reportedTotal = firstNonNegativeTokenCount([usage.total_tokens, usage.totalTokens])
+  const totalTokens = reportedTotal > 0 ? reportedTotal : totalInputTokens + outputTokens
+
+  return {
+    totalInputTokens,
+    actualInputTokens,
+    cacheReadTokens,
+    cacheCreateTokens,
+    outputTokens,
+    totalTokens
+  }
 }
 
 function isOpenAIRelatedEndpoint(endpoint) {
@@ -663,10 +760,11 @@ function getRequestDetailCacheMetrics(detail = {}) {
     OPENAI_RELATED_ACCOUNT_TYPES.has(detail.accountType) || isOpenAIRelatedEndpoint(detail.endpoint)
   const denominator = input + read + create
 
+  // GPT-5.6+ bills cache writes; keep create metrics for all providers including OpenAI.
   if (denominator <= 0) {
     return {
       isOpenAIRelated,
-      cacheCreateNotApplicable: isOpenAIRelated,
+      cacheCreateNotApplicable: false,
       numerator: read,
       denominator: 0,
       formula: CACHE_HIT_FORMULA,
@@ -677,7 +775,7 @@ function getRequestDetailCacheMetrics(detail = {}) {
 
   return {
     isOpenAIRelated,
-    cacheCreateNotApplicable: isOpenAIRelated,
+    cacheCreateNotApplicable: false,
     numerator: read,
     denominator,
     formula: CACHE_HIT_FORMULA,
@@ -714,6 +812,8 @@ module.exports = {
   createRequestDetailMeta,
   finalizeRequestDetailMeta,
   extractOpenAICacheReadTokens,
+  extractOpenAICacheWriteTokens,
+  extractOpenAIUsageTokens,
   isOpenAIRelatedEndpoint,
   CACHE_HIT_FORMULA,
   getRequestDetailCacheMetrics,

@@ -625,9 +625,8 @@ function finalizeSummary(accumulator) {
     cacheHitNumerator: accumulator.cacheHitNumerator,
     cacheHitDenominator: accumulator.cacheHitDenominator,
     cacheHitFormula: CACHE_HIT_FORMULA,
-    cacheCreateNotApplicable:
-      accumulator.totalRequests > 0 &&
-      accumulator.openAIRelatedRequests === accumulator.totalRequests
+    // OpenAI GPT-5.6+ has billable cache writes; do not mark create as N/A for OpenAI-only windows.
+    cacheCreateNotApplicable: false
   }
 }
 

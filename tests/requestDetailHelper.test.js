@@ -5,6 +5,8 @@ const {
   createRequestDetailMeta,
   finalizeRequestDetailMeta,
   extractOpenAICacheReadTokens,
+  extractOpenAICacheWriteTokens,
+  extractOpenAIUsageTokens,
   isOpenAIRelatedEndpoint,
   getRequestDetailCacheMetrics,
   calculateCacheHitRate
@@ -252,6 +254,112 @@ describe('requestDetailHelper', () => {
         prompt_tokens_details: { cached_tokens: null }
       })
     ).toBe(0)
+  })
+
+  test('extractOpenAICacheWriteTokens prefers GPT-5.6 cache_write_tokens in details', () => {
+    expect(
+      extractOpenAICacheWriteTokens({
+        input_tokens_details: {
+          cache_write_tokens: 1280,
+          cache_creation_tokens: 99
+        },
+        cache_creation_input_tokens: 50
+      })
+    ).toBe(1280)
+  })
+
+  test('extractOpenAICacheWriteTokens trusts present cache_write_tokens:0 and ignores top-level legacy', () => {
+    // Real Responses payload always includes cache_write_tokens, often 0 on some gateways.
+    expect(
+      extractOpenAICacheWriteTokens({
+        input_tokens_details: {
+          cache_write_tokens: 0,
+          cached_tokens: 4864
+        },
+        cache_creation_input_tokens: 999
+      })
+    ).toBe(0)
+  })
+
+  test('extractOpenAICacheWriteTokens falls back inside details or top-level when write key absent', () => {
+    expect(
+      extractOpenAICacheWriteTokens({
+        prompt_tokens_details: { cache_creation_tokens: '64' }
+      })
+    ).toBe(64)
+
+    expect(
+      extractOpenAICacheWriteTokens({
+        cache_creation_input_tokens: 32
+      })
+    ).toBe(32)
+  })
+
+  test('extractOpenAIUsageTokens matches live Responses cache-hit shape', () => {
+    // Captured from cpa.us.xcodecli.com /v1/responses gpt-5.6-sol
+    const usage = extractOpenAIUsageTokens({
+      input_tokens: 5064,
+      input_tokens_details: {
+        cache_write_tokens: 0,
+        cached_tokens: 4864
+      },
+      output_tokens: 7,
+      output_tokens_details: {
+        reasoning_tokens: 0
+      },
+      total_tokens: 5071
+    })
+
+    expect(usage).toEqual({
+      totalInputTokens: 5064,
+      actualInputTokens: 200,
+      cacheReadTokens: 4864,
+      cacheCreateTokens: 0,
+      outputTokens: 7,
+      totalTokens: 5071
+    })
+  })
+
+  test('extractOpenAIUsageTokens peels non-zero cache write out of inclusive input_tokens', () => {
+    const usage = extractOpenAIUsageTokens({
+      input_tokens: 4000,
+      input_tokens_details: {
+        cache_write_tokens: 1200,
+        cached_tokens: 800
+      },
+      output_tokens: 6,
+      total_tokens: 4006
+    })
+
+    expect(usage).toEqual({
+      totalInputTokens: 4000,
+      actualInputTokens: 2000,
+      cacheReadTokens: 800,
+      cacheCreateTokens: 1200,
+      outputTokens: 6,
+      totalTokens: 4006
+    })
+  })
+
+  test('extractOpenAIUsageTokens matches live Chat Completions shape without write field', () => {
+    // Captured from cpa.us.xcodecli.com /v1/chat/completions gpt-5.6-sol
+    const usage = extractOpenAIUsageTokens({
+      prompt_tokens: 5064,
+      completion_tokens: 7,
+      total_tokens: 5071,
+      prompt_tokens_details: {
+        cached_tokens: 4864
+      },
+      completion_tokens_details: {
+        reasoning_tokens: 0
+      }
+    })
+
+    expect(usage.actualInputTokens).toBe(200)
+    expect(usage.cacheReadTokens).toBe(4864)
+    expect(usage.cacheCreateTokens).toBe(0)
+    expect(usage.outputTokens).toBe(7)
+    expect(usage.totalTokens).toBe(5071)
   })
 
   test('calculateCacheHitRate uses cacheRead / (input + cacheRead + cacheCreate)', () => {
