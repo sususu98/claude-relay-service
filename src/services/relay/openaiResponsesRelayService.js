@@ -70,13 +70,15 @@ class OpenAIResponsesRelayService {
       res.once('close', handleClientDisconnect)
 
       // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
-      const providerEndpoint = fullAccount.providerEndpoint || 'responses'
+      const providerEndpoint = openaiResponsesAccountService.normalizeProviderEndpoint(
+        fullAccount.providerEndpoint || 'responses'
+      )
       let targetPath = req.path
 
-      // 根据 providerEndpoint 配置归一化路径
-      // 注意：unified.js 已将 /v1/chat/completions 的请求体转换为 Responses 格式，
-      // 因此这里只需归一化路径即可；反向 responses→completions 需要同时转换请求体，
-      // 目前不支持，所以只保留 responses 和 auto 两种模式
+      // 根据 providerEndpoint 配置归一化路径：
+      // - responses：来自旧 unified 转换链路时归一化到 /v1/responses
+      // - chat：原生 Chat Completions 透传，确保落到 /v1/chat/completions（或 /chat/completions）
+      // - passthrough / auto：保持客户端原始路径（/v1/chat/completions 或 /v1/responses）直接透传给上游（如 CPA）
       if (
         providerEndpoint === 'responses' &&
         (targetPath === '/v1/chat/completions' || targetPath === '/chat/completions')
@@ -84,8 +86,16 @@ class OpenAIResponsesRelayService {
         const newPath = targetPath.startsWith('/v1') ? '/v1/responses' : '/responses'
         logger.info(`📝 Normalized path (${req.path}) → ${newPath} (providerEndpoint=responses)`)
         targetPath = newPath
+      } else if (
+        providerEndpoint === 'chat' &&
+        targetPath !== '/v1/chat/completions' &&
+        targetPath !== '/chat/completions'
+      ) {
+        targetPath = '/v1/chat/completions'
       }
-      // providerEndpoint === 'auto' 时保持原始路径不变
+
+      const isChatCompletionsPath =
+        targetPath === '/v1/chat/completions' || targetPath === '/chat/completions'
 
       // 防止 baseApi 已含 /v1 时路径重复（如 baseApi=http://host/v1 + targetPath=/v1/responses → /v1/v1/responses）
       const baseApi = fullAccount.baseApi || ''
@@ -113,14 +123,32 @@ class OpenAIResponsesRelayService {
         logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
       }
 
+      // Chat Completions 流式直通时自动请求上游附带 usage，保证计费准确
+      let requestBody = req.body
+      if (
+        isChatCompletionsPath &&
+        requestBody &&
+        typeof requestBody === 'object' &&
+        requestBody.stream === true &&
+        requestBody.stream_options?.include_usage !== false
+      ) {
+        requestBody = {
+          ...requestBody,
+          stream_options: {
+            ...(requestBody.stream_options || {}),
+            include_usage: true
+          }
+        }
+      }
+
       // 配置请求选项
       const requestOptions = {
         method: req.method,
         url: targetUrl,
         headers,
-        data: req.body,
+        data: requestBody,
         timeout: this.defaultTimeout,
-        responseType: req.body?.stream ? 'stream' : 'json',
+        responseType: requestBody?.stream ? 'stream' : 'json',
         validateStatus: () => true, // 允许处理所有状态码
         signal: abortController.signal
       }
@@ -456,10 +484,9 @@ class OpenAIResponsesRelayService {
     handleClientDisconnect,
     req
   ) {
-    // 设置 SSE 响应头
+    // 设置 SSE 响应头（不强设 Connection: keep-alive，避免 Node v18 在 Nginx Connection: close 下挂起 504）
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
 
     let usageData = null
@@ -495,6 +522,25 @@ class OpenAIResponsesRelayService {
               if (eventData.response.usage) {
                 usageData = eventData.response.usage
                 logger.info('📊 Successfully captured usage data from OpenAI-Responses:', {
+                  input_tokens: usageData.input_tokens,
+                  output_tokens: usageData.output_tokens,
+                  total_tokens: usageData.total_tokens
+                })
+              }
+            } else {
+              // 兼容 OpenAI Chat Completions 流式 SSE chunk（顶层 model / usage）
+              if (eventData.model && !actualModel) {
+                actualModel = eventData.model
+                logger.debug(`📊 Captured actual model from Chat Completions chunk: ${actualModel}`)
+              }
+              if (eventData.usage && typeof eventData.usage === 'object') {
+                usageData = eventData.usage
+                if (eventData.model) {
+                  actualModel = eventData.model
+                }
+                logger.info('📊 Successfully captured usage data from Chat Completions stream:', {
+                  prompt_tokens: usageData.prompt_tokens,
+                  completion_tokens: usageData.completion_tokens,
                   input_tokens: usageData.input_tokens,
                   output_tokens: usageData.output_tokens,
                   total_tokens: usageData.total_tokens
@@ -536,8 +582,8 @@ class OpenAIResponsesRelayService {
           res.write(chunk)
         }
 
-        // 同时解析数据以捕获 usage 信息
-        buffer += chunkStr
+        // 同时解析数据以捕获 usage 信息（兼容 CRLF 与 LF）
+        buffer += chunkStr.replace(/\r\n/g, '\n')
 
         // 处理完整的 SSE 事件
         if (buffer.includes('\n\n')) {

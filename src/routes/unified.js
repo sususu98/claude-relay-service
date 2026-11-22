@@ -112,8 +112,78 @@ async function hasAnyGrokAccount() {
   }
 }
 
+async function tryDirectChatPassthrough(req, res, requestedModel, fallbackBackend) {
+  const unifiedOpenAIScheduler = require('../services/scheduler/unifiedOpenAIScheduler')
+  if (typeof unifiedOpenAIScheduler.hasMatchingChatPassthroughAccount !== 'function') {
+    return false
+  }
+  const hasMatch = await unifiedOpenAIScheduler.hasMatchingChatPassthroughAccount(
+    req.apiKey,
+    requestedModel
+  )
+  if (!hasMatch) {
+    return false
+  }
+
+  const { permissions } = req.apiKey
+  const hasAccess =
+    apiKeyService.hasPermission(permissions, 'openai') ||
+    (fallbackBackend && apiKeyService.hasPermission(permissions, fallbackBackend))
+  if (!hasAccess) {
+    res.status(403).json({
+      error: {
+        message: 'This API key does not have permission to access OpenAI',
+        type: 'permission_denied',
+        code: 'permission_denied'
+      }
+    })
+    return true
+  }
+
+  const crypto = require('crypto')
+  const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
+  const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
+
+  const sessionId =
+    req.headers['session_id'] ||
+    req.headers['x-session-id'] ||
+    req.body?.session_id ||
+    req.body?.conversation_id ||
+    req.body?.prompt_cache_key ||
+    null
+  const sessionHash = sessionId
+    ? crypto.createHash('sha256').update(String(sessionId)).digest('hex')
+    : null
+
+  const selected = await unifiedOpenAIScheduler.selectAccountForApiKey(
+    req.apiKey,
+    sessionHash,
+    requestedModel,
+    { requiredEndpoint: 'chat' }
+  )
+  const account = await openaiResponsesAccountService.getAccount(selected.accountId)
+  if (!account) {
+    const err = new Error(`OpenAI-Responses passthrough account ${selected.accountId} not found`)
+    err.statusCode = 404
+    throw err
+  }
+
+  req._serviceTier = req.body?.service_tier === 'priority' ? 'priority' : null
+  logger.info(
+    `🔀 Direct Chat Completions passthrough - Model: ${requestedModel}, Account: ${account.name} (${account.providerEndpoint})`
+  )
+  await openaiResponsesRelayService.handleRequest(req, res, account, req.apiKey)
+  return true
+}
+
 async function routeToBackend(req, res, requestedModel) {
   const backend = detectBackendFromModel(requestedModel)
+
+  // 若配置了支持原生 Chat Completions 透传（providerEndpoint=chat|passthrough）且匹配该模型的上游账号（如 CPA），
+  // 则直接原样转发 /v1/chat/completions，跳过 CRS 内部格式翻译与 Codex 提示词注入。
+  if (await tryDirectChatPassthrough(req, res, requestedModel, backend)) {
+    return
+  }
 
   logger.info(`🔀 Routing request - Model: ${requestedModel}, Backend: ${backend}`)
 

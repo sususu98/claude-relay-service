@@ -17,6 +17,7 @@ const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
 const {
   createRequestDetailMeta,
+  extractOpenAICacheReadTokens,
   extractOpenAIUsageTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
@@ -183,7 +184,7 @@ async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel =
       ? crypto.createHash('sha256').update(sessionId).digest('hex')
       : null
 
-    // 使用统一调度器选择账户
+    // 使用统一调度器选择账户（默认自动排除仅支持 chat 的账号）
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
       sessionHash,
@@ -326,6 +327,10 @@ const handleResponses = async (req, res) => {
     const compactRoute = isCompactResponsesRoute(req)
     const shouldUseToggleControlledFlow = standardResponsesRoute && !compactRoute
 
+    // 保留原始请求体快照：当选中 passthrough 账号（如 CPA 通用翻译器）时跳过 Codex 改写与提示词注入
+    const rawBodyBeforeAdaptation =
+      req.body && typeof req.body === 'object' ? { ...req.body } : req.body
+
     if (shouldUseToggleControlledFlow) {
       const shouldApplyCodexAdaptation =
         apiKeyData.enableOpenAIResponsesCodexAdaptation === true && !isCodexCLI
@@ -384,7 +389,7 @@ const handleResponses = async (req, res) => {
       )
     }
 
-    // 使用调度器选择账户
+    // 使用调度器选择账户（默认自动排除仅支持 chat 的账号）
     ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
       apiKeyData,
       sessionId,
@@ -393,6 +398,23 @@ const handleResponses = async (req, res) => {
 
     // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理
     if (accountType === 'openai-responses') {
+      const normalizedEp =
+        typeof openaiResponsesAccountService.normalizeProviderEndpoint === 'function'
+          ? openaiResponsesAccountService.normalizeProviderEndpoint(account?.providerEndpoint)
+          : account?.providerEndpoint || 'responses'
+      if (normalizedEp === 'passthrough' && rawBodyBeforeAdaptation) {
+        // passthrough 模式原样透传客户端请求给上游（如 CPA 翻译器），避免被 Codex 适配改写 model/instructions
+        req.body = rawBodyBeforeAdaptation
+        if (
+          shouldUseToggleControlledFlow &&
+          apiKeyData.enableOpenAIResponsesPayloadRules === true
+        ) {
+          req.body = requestBodyRuleService.applyRules(
+            req.body,
+            apiKeyData.openaiResponsesPayloadRules
+          )
+        }
+      }
       logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
       return await openaiResponsesRelayService.handleRequest(req, res, account, apiKeyData)
     }

@@ -6,6 +6,76 @@ const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
+const VALID_PROVIDER_ENDPOINTS = ['responses', 'auto', 'chat', 'passthrough']
+
+function normalizeProviderEndpoint(endpoint) {
+  if (!endpoint || typeof endpoint !== 'string') {
+    return 'responses'
+  }
+  const normalized = endpoint.trim().toLowerCase()
+  if (normalized === 'completions') {
+    return 'chat'
+  }
+  return normalized
+}
+
+function normalizeSupportedModels(raw) {
+  if (!raw) {
+    return []
+  }
+  let items = raw
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) {
+      return []
+    }
+    if (trimmed.startsWith('[')) {
+      try {
+        items = JSON.parse(trimmed)
+      } catch {
+        items = trimmed.split(/[\n,]+/)
+      }
+    } else {
+      items = trimmed.split(/[\n,]+/)
+    }
+  } else if (typeof raw === 'object' && !Array.isArray(raw)) {
+    items = Object.keys(raw)
+  }
+  if (!Array.isArray(items)) {
+    return []
+  }
+  const seen = new Set()
+  const out = []
+  for (const item of items) {
+    const val = String(item || '').trim()
+    if (val && !seen.has(val)) {
+      seen.add(val)
+      out.push(val)
+    }
+  }
+  return out
+}
+
+function wildcardMatchModel(pattern, modelName) {
+  const p = String(pattern || '')
+    .trim()
+    .toLowerCase()
+  const m = String(modelName || '')
+    .trim()
+    .toLowerCase()
+  if (!p || !m) {
+    return false
+  }
+  if (p === '*' || p === m) {
+    return true
+  }
+  if (!p.includes('*')) {
+    return false
+  }
+  const escaped = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  return new RegExp(`^${escaped}$`).test(m)
+}
+
 class OpenAIResponsesAccountService {
   constructor() {
     // 加密相关常量
@@ -23,7 +93,7 @@ class OpenAIResponsesAccountService {
     this._decryptCache = new LRUCache(500)
 
     // 🧹 定期清理缓存（每10分钟）
-    setInterval(
+    const cleanupTimer = setInterval(
       () => {
         this._decryptCache.cleanup()
         logger.info(
@@ -33,6 +103,7 @@ class OpenAIResponsesAccountService {
       },
       10 * 60 * 1000
     )
+    cleanupTimer.unref?.()
   }
 
   // 创建账户
@@ -52,7 +123,8 @@ class OpenAIResponsesAccountService {
       quotaResetTime = '00:00', // 额度重置时间（HH:mm格式）
       rateLimitDuration = 60, // 限流时间（分钟）
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
-      providerEndpoint = 'responses' // Provider 端点类型：responses | auto
+      providerEndpoint = 'responses', // Provider 端点类型：responses | auto | chat | passthrough
+      supportedModels = [] // 可选：支持的模型白名单（支持通配符如 agy/*，留空表示全部支持）
     } = options
 
     // 验证必填字段
@@ -60,13 +132,15 @@ class OpenAIResponsesAccountService {
       throw new Error('Base API URL and API Key are required for OpenAI-Responses account')
     }
 
-    // 验证 providerEndpoint 枚举值
-    const validEndpoints = ['responses', 'auto']
-    if (!validEndpoints.includes(providerEndpoint)) {
+    // 验证并规范化 providerEndpoint 枚举值
+    const normalizedEndpoint = normalizeProviderEndpoint(providerEndpoint)
+    if (!VALID_PROVIDER_ENDPOINTS.includes(normalizedEndpoint)) {
       throw new Error(
-        `Invalid providerEndpoint: ${providerEndpoint}. Must be one of: ${validEndpoints.join(', ')}`
+        `Invalid providerEndpoint: ${providerEndpoint}. Must be one of: ${VALID_PROVIDER_ENDPOINTS.join(', ')}`
       )
     }
+
+    const normalizedSupportedModels = normalizeSupportedModels(supportedModels)
 
     // 规范化 baseApi（确保不以 / 结尾）
     const normalizedBaseApi = baseApi.endsWith('/') ? baseApi.slice(0, -1) : baseApi
@@ -106,7 +180,9 @@ class OpenAIResponsesAccountService {
       quotaResetTime,
       quotaStoppedAt: '',
       disableAutoProtection: disableAutoProtection.toString(), // 关闭自动防护
-      providerEndpoint // Provider 端点类型：responses(默认) | auto
+      providerEndpoint: normalizedEndpoint, // Provider 端点类型：responses | auto | chat | passthrough
+      supportedModels:
+        normalizedSupportedModels.length > 0 ? JSON.stringify(normalizedSupportedModels) : ''
     }
 
     // 保存到 Redis
@@ -116,6 +192,7 @@ class OpenAIResponsesAccountService {
 
     return {
       ...accountData,
+      supportedModels: normalizedSupportedModels,
       apiKey: '***' // 返回时隐藏敏感信息
     }
   }
@@ -141,6 +218,8 @@ class OpenAIResponsesAccountService {
         accountData.proxy = null
       }
     }
+    accountData.providerEndpoint = normalizeProviderEndpoint(accountData.providerEndpoint)
+    accountData.supportedModels = normalizeSupportedModels(accountData.supportedModels)
 
     return accountData
   }
@@ -175,14 +254,21 @@ class OpenAIResponsesAccountService {
       // 直接保存，不做任何调整
     }
 
-    // 验证 providerEndpoint 枚举值
+    // 验证并规范化 providerEndpoint 枚举值
     if (updates.providerEndpoint !== undefined) {
-      const validEndpoints = ['responses', 'auto']
-      if (!validEndpoints.includes(updates.providerEndpoint)) {
+      const normalizedEndpoint = normalizeProviderEndpoint(updates.providerEndpoint)
+      if (!VALID_PROVIDER_ENDPOINTS.includes(normalizedEndpoint)) {
         throw new Error(
-          `Invalid providerEndpoint: ${updates.providerEndpoint}. Must be one of: ${validEndpoints.join(', ')}`
+          `Invalid providerEndpoint: ${updates.providerEndpoint}. Must be one of: ${VALID_PROVIDER_ENDPOINTS.join(', ')}`
         )
       }
+      updates.providerEndpoint = normalizedEndpoint
+    }
+
+    // 规范化 supportedModels
+    if (updates.supportedModels !== undefined) {
+      const normalizedModels = normalizeSupportedModels(updates.supportedModels)
+      updates.supportedModels = normalizedModels.length > 0 ? JSON.stringify(normalizedModels) : ''
     }
 
     // 自动防护开关
@@ -281,11 +367,42 @@ class OpenAIResponsesAccountService {
       accountData.isActive = accountData.isActive === 'true'
       accountData.expiresAt = accountData.subscriptionExpiresAt || null
       accountData.platform = accountData.platform || 'openai-responses'
+      accountData.providerEndpoint = normalizeProviderEndpoint(accountData.providerEndpoint)
+      accountData.supportedModels = normalizeSupportedModels(accountData.supportedModels)
 
       accounts.push(accountData)
     })
 
     return accounts
+  }
+
+  normalizeProviderEndpoint(endpoint) {
+    return normalizeProviderEndpoint(endpoint)
+  }
+
+  accountSupportsEndpoint(account, requiredEndpoint = null) {
+    const ep = normalizeProviderEndpoint(account?.providerEndpoint)
+    if (!requiredEndpoint) {
+      return ep !== 'chat'
+    }
+    if (requiredEndpoint === 'chat') {
+      return ep === 'chat' || ep === 'passthrough'
+    }
+    if (requiredEndpoint === 'responses') {
+      return ep === 'responses' || ep === 'auto' || ep === 'passthrough'
+    }
+    return true
+  }
+
+  matchesSupportedModels(account, modelName) {
+    if (!modelName) {
+      return true
+    }
+    const list = normalizeSupportedModels(account?.supportedModels)
+    if (list.length === 0) {
+      return true
+    }
+    return list.some((pattern) => wildcardMatchModel(pattern, modelName))
   }
 
   // 标记账户限流

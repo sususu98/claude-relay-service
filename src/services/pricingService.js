@@ -388,6 +388,18 @@ class PricingService {
       return this.pricingData[modelName]
     }
 
+    // 剥离网关路由前缀（如 agy/gemini-4-neon -> gemini-4-neon、antigravity/claude-...）后回退查价
+    const strippedGatewayPrefix = modelName.replace(/^(?:agy|antigravity)\//i, '')
+    if (strippedGatewayPrefix && strippedGatewayPrefix !== modelName) {
+      const strippedPricing = this.getModelPricing(strippedGatewayPrefix)
+      if (strippedPricing) {
+        logger.debug(
+          `💰 Found pricing for ${modelName} by stripping gateway prefix: ${strippedGatewayPrefix}`
+        )
+        return strippedPricing
+      }
+    }
+
     // 特殊处理：gpt-5.5 回退到 gpt-5
     if (modelName === 'gpt-5.5' && !this.pricingData['gpt-5.5']) {
       const fallbackPricing = this.pricingData['gpt-5']
@@ -582,8 +594,7 @@ class PricingService {
       has200kPricing &&
       typeof pricing?.litellm_provider === 'string' &&
       pricing.litellm_provider.toLowerCase() === 'xai'
-    const isLongContextModeEnabled =
-      isLongContextModel || hasContext1mBeta || isXaiTieredPricing
+    const isLongContextModeEnabled = isLongContextModel || hasContext1mBeta || isXaiTieredPricing
     const longContextThreshold272k = 272000
 
     // Fast Mode 倍率：优先从 provider_specific_entry.fast 读取，默认 6 倍

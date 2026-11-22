@@ -118,8 +118,105 @@ class UnifiedOpenAIScheduler {
     return { canUse: true }
   }
 
+  _getStickySessionKey(sessionHash, requiredEndpoint = null) {
+    if (!sessionHash) {
+      return null
+    }
+    return requiredEndpoint === 'chat' ? `chat:${sessionHash}` : sessionHash
+  }
+
+  _accountMatchesRequirement(account, accountType, requestedModel, requiredEndpoint = null) {
+    if (accountType === 'openai') {
+      if (requiredEndpoint === 'chat') {
+        return false
+      }
+      if (requestedModel && account.supportedModels && account.supportedModels.length > 0) {
+        return account.supportedModels.includes(requestedModel)
+      }
+      return true
+    }
+
+    if (accountType === 'openai-responses') {
+      if (!openaiResponsesAccountService.accountSupportsEndpoint(account, requiredEndpoint)) {
+        return false
+      }
+      return openaiResponsesAccountService.matchesSupportedModels(account, requestedModel)
+    }
+
+    return false
+  }
+
+  // 🔍 零副作用探测是否存在支持 Chat Completions 原生透传的匹配账号（供 unified.js 快速分流）
+  async hasMatchingChatPassthroughAccount(apiKeyData, requestedModel = null) {
+    try {
+      if (apiKeyData?.openaiAccountId) {
+        if (apiKeyData.openaiAccountId.startsWith('group:')) {
+          const groupId = apiKeyData.openaiAccountId.replace('group:', '')
+          const memberIds = await accountGroupService.getGroupMembers(groupId)
+          for (const memberId of memberIds) {
+            const account = await openaiResponsesAccountService.getAccount(memberId)
+            if (
+              account &&
+              (account.isActive === true || account.isActive === 'true') &&
+              account.status !== 'error' &&
+              account.status !== 'unauthorized' &&
+              isSchedulable(account.schedulable) &&
+              !openaiResponsesAccountService.isSubscriptionExpired(account) &&
+              this._accountMatchesRequirement(account, 'openai-responses', requestedModel, 'chat')
+            ) {
+              return true
+            }
+          }
+          return false
+        }
+
+        if (apiKeyData.openaiAccountId.startsWith('responses:')) {
+          const accountId = apiKeyData.openaiAccountId.replace('responses:', '')
+          const account = await openaiResponsesAccountService.getAccount(accountId)
+          return Boolean(
+            account &&
+              (account.isActive === true || account.isActive === 'true') &&
+              account.status !== 'error' &&
+              account.status !== 'unauthorized' &&
+              isSchedulable(account.schedulable) &&
+              !openaiResponsesAccountService.isSubscriptionExpired(account) &&
+              this._accountMatchesRequirement(account, 'openai-responses', requestedModel, 'chat')
+          )
+        }
+
+        return false
+      }
+
+      const accounts = await openaiResponsesAccountService.getAllAccounts()
+      for (const account of accounts) {
+        if (
+          (account.isActive === true || account.isActive === 'true') &&
+          account.status !== 'error' &&
+          account.status !== 'unauthorized' &&
+          (account.accountType === 'shared' || !account.accountType) &&
+          isSchedulable(account.schedulable) &&
+          !openaiResponsesAccountService.isSubscriptionExpired(account) &&
+          this._accountMatchesRequirement(account, 'openai-responses', requestedModel, 'chat')
+        ) {
+          return true
+        }
+      }
+      return false
+    } catch (error) {
+      logger.warn('⚠️ Failed to probe chat passthrough OpenAI-Responses accounts:', error.message)
+      return false
+    }
+  }
+
   // 🎯 统一调度OpenAI账号
-  async selectAccountForApiKey(apiKeyData, sessionHash = null, requestedModel = null) {
+  async selectAccountForApiKey(
+    apiKeyData,
+    sessionHash = null,
+    requestedModel = null,
+    options = {}
+  ) {
+    const requiredEndpoint = options?.requiredEndpoint || null
+    const stickyKey = this._getStickySessionKey(sessionHash, requiredEndpoint)
     try {
       // 如果API Key绑定了专属账户或分组，优先使用
       if (apiKeyData.openaiAccountId) {
@@ -129,7 +226,13 @@ class UnifiedOpenAIScheduler {
           logger.info(
             `🎯 API key ${apiKeyData.name} is bound to group ${groupId}, selecting from group`
           )
-          return await this.selectAccountFromGroup(groupId, sessionHash, requestedModel, apiKeyData)
+          return await this.selectAccountFromGroup(
+            groupId,
+            sessionHash,
+            requestedModel,
+            apiKeyData,
+            options
+          )
         }
 
         // 普通专属账户 - 根据前缀判断是 OpenAI 还是 OpenAI-Responses 类型
@@ -223,22 +326,20 @@ class UnifiedOpenAIScheduler {
               }
             }
 
-            // 专属账户：可选的模型检查（只有明确配置了supportedModels且不为空才检查）
-            // OpenAI-Responses 账户默认支持所有模型
+            // 专属账户：端点与模型兼容校验
             if (
-              accountType === 'openai' &&
-              requestedModel &&
-              boundAccount.supportedModels &&
-              boundAccount.supportedModels.length > 0
+              !this._accountMatchesRequirement(
+                boundAccount,
+                accountType,
+                requestedModel,
+                requiredEndpoint
+              )
             ) {
-              const modelSupported = boundAccount.supportedModels.includes(requestedModel)
-              if (!modelSupported) {
-                const errorMsg = `Dedicated account ${boundAccount.name} does not support model ${requestedModel}`
-                logger.warn(`⚠️ ${errorMsg}`)
-                const error = new Error(errorMsg)
-                error.statusCode = 400 // Bad Request - 请求参数错误
-                throw error
-              }
+              const errorMsg = `Dedicated account ${boundAccount.name} does not support ${requiredEndpoint || 'requested'} endpoint or model ${requestedModel || 'unknown'}`
+              logger.warn(`⚠️ ${errorMsg}`)
+              const error = new Error(errorMsg)
+              error.statusCode = 400 // Bad Request - 请求参数错误
+              throw error
             }
 
             logger.info(
@@ -273,34 +374,40 @@ class UnifiedOpenAIScheduler {
       }
 
       // 如果有会话哈希，检查是否有已映射的账户
-      if (sessionHash) {
-        const mappedAccount = await this._getSessionMapping(sessionHash)
+      if (stickyKey) {
+        const mappedAccount = await this._getSessionMapping(stickyKey)
         if (mappedAccount) {
-          // 验证映射的账户是否仍然可用
+          // 验证映射的账户是否仍然可用且兼容本次请求的端点和模型
           const isAvailable = await this._isAccountAvailable(
             mappedAccount.accountId,
-            mappedAccount.accountType
+            mappedAccount.accountType,
+            requestedModel,
+            requiredEndpoint
           )
           if (isAvailable) {
             // 🚀 智能会话续期（续期 unified 映射键，按配置）
-            await this._extendSessionMappingTTL(sessionHash)
+            await this._extendSessionMappingTTL(stickyKey)
             logger.info(
-              `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+              `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${stickyKey}`
             )
             // 更新账户的最后使用时间
             await this.updateAccountLastUsed(mappedAccount.accountId, mappedAccount.accountType)
             return mappedAccount
           } else {
             logger.warn(
-              `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
+              `⚠️ Mapped account ${mappedAccount.accountId} is no longer available or compatible, selecting new account`
             )
-            await this._deleteSessionMapping(sessionHash)
+            await this._deleteSessionMapping(stickyKey)
           }
         }
       }
 
       // 获取所有可用账户
-      const availableAccounts = await this._getAllAvailableAccounts(apiKeyData, requestedModel)
+      const availableAccounts = await this._getAllAvailableAccounts(
+        apiKeyData,
+        requestedModel,
+        options
+      )
 
       if (availableAccounts.length === 0) {
         // 提供更详细的错误信息
@@ -324,14 +431,14 @@ class UnifiedOpenAIScheduler {
       const selectedAccount = sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
-      if (sessionHash) {
+      if (stickyKey) {
         await this._setSessionMapping(
-          sessionHash,
+          stickyKey,
           selectedAccount.accountId,
           selectedAccount.accountType
         )
         logger.info(
-          `🎯 Created new sticky session mapping: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) for session ${sessionHash}`
+          `🎯 Created new sticky session mapping: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) for session ${stickyKey}`
         )
       }
 
@@ -353,14 +460,16 @@ class UnifiedOpenAIScheduler {
   }
 
   // 📋 获取所有可用账户（仅共享池）
-  async _getAllAvailableAccounts(apiKeyData, requestedModel = null) {
+  async _getAllAvailableAccounts(apiKeyData, requestedModel = null, options = {}) {
+    const requiredEndpoint = options?.requiredEndpoint || null
     const availableAccounts = []
 
     // 注意：专属账户的处理已经在 selectAccountForApiKey 中完成
     // 这里只处理共享池账户
 
-    // 获取所有OpenAI账户（共享池）
-    const openaiAccounts = await openaiAccountService.getAllAccounts()
+    // 获取所有OpenAI账户（共享池；Chat Completions 原生透传模式不走官方 Codex OAuth 账号）
+    const openaiAccounts =
+      requiredEndpoint === 'chat' ? [] : await openaiAccountService.getAllAccounts()
     for (let account of openaiAccounts) {
       if (
         account.isActive &&
@@ -502,8 +611,20 @@ class UnifiedOpenAIScheduler {
           continue
         }
 
-        // OpenAI-Responses 账户默认支持所有模型
-        // 因为它们是第三方兼容 API，模型支持由第三方决定
+        // 校验端点模式与可选模型白名单（supportedModels 为空时保持默认全支持）
+        if (
+          !this._accountMatchesRequirement(
+            account,
+            'openai-responses',
+            requestedModel,
+            requiredEndpoint
+          )
+        ) {
+          logger.debug(
+            `⏭️ Skipping OpenAI-Responses account ${account.name} - endpoint(${account.providerEndpoint}) or supportedModels incompatible with ${requiredEndpoint || 'responses'}/${requestedModel || '*'}`
+          )
+          continue
+        }
 
         availableAccounts.push({
           ...account,
@@ -518,8 +639,13 @@ class UnifiedOpenAIScheduler {
     return availableAccounts
   }
 
-  // 🔍 检查账户是否可用
-  async _isAccountAvailable(accountId, accountType) {
+  // 🔍 检查账户是否可用（含可选模型与端点兼容检查）
+  async _isAccountAvailable(
+    accountId,
+    accountType,
+    requestedModel = null,
+    requiredEndpoint = null
+  ) {
     try {
       if (accountType === 'openai') {
         const account = await openaiAccountService.getAccount(accountId)
@@ -552,6 +678,10 @@ class UnifiedOpenAIScheduler {
         )
         if (isTempUnavailable) {
           logger.info(`⏱️ OpenAI account ${accountId} (${accountType}) is temporarily unavailable`)
+          return false
+        }
+
+        if (!this._accountMatchesRequirement(account, 'openai', requestedModel, requiredEndpoint)) {
           return false
         }
 
@@ -589,6 +719,17 @@ class UnifiedOpenAIScheduler {
         )
         if (isTempUnavailable) {
           logger.info(`⏱️ OpenAI account ${accountId} (${accountType}) is temporarily unavailable`)
+          return false
+        }
+
+        if (
+          !this._accountMatchesRequirement(
+            account,
+            'openai-responses',
+            requestedModel,
+            requiredEndpoint
+          )
+        ) {
           return false
         }
 
@@ -815,7 +956,15 @@ class UnifiedOpenAIScheduler {
   }
 
   // 👥 从分组中选择账户
-  async selectAccountFromGroup(groupId, sessionHash = null, requestedModel = null) {
+  async selectAccountFromGroup(
+    groupId,
+    sessionHash = null,
+    requestedModel = null,
+    _apiKeyData = null,
+    options = {}
+  ) {
+    const requiredEndpoint = options?.requiredEndpoint || null
+    const stickyKey = this._getStickySessionKey(sessionHash, requiredEndpoint)
     try {
       // 获取分组信息
       const group = await accountGroupService.getGroup(groupId)
@@ -834,19 +983,21 @@ class UnifiedOpenAIScheduler {
       logger.info(`👥 Selecting account from OpenAI group: ${group.name}`)
 
       // 如果有会话哈希，检查是否有已映射的账户
-      if (sessionHash) {
-        const mappedAccount = await this._getSessionMapping(sessionHash)
+      if (stickyKey) {
+        const mappedAccount = await this._getSessionMapping(stickyKey)
         if (mappedAccount) {
           // 验证映射的账户是否仍然可用并且在分组中
           const isInGroup = await this._isAccountInGroup(mappedAccount.accountId, groupId)
           if (isInGroup) {
             const isAvailable = await this._isAccountAvailable(
               mappedAccount.accountId,
-              mappedAccount.accountType
+              mappedAccount.accountType,
+              requestedModel,
+              requiredEndpoint
             )
             if (isAvailable) {
               // 🚀 智能会话续期（续期 unified 映射键，按配置）
-              await this._extendSessionMappingTTL(sessionHash)
+              await this._extendSessionMappingTTL(stickyKey)
               logger.info(
                 `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType})`
               )
@@ -856,7 +1007,7 @@ class UnifiedOpenAIScheduler {
             }
           }
           // 如果账户不可用或不在分组中，删除映射
-          await this._deleteSessionMapping(sessionHash)
+          await this._deleteSessionMapping(stickyKey)
         }
       }
 
@@ -925,16 +1076,14 @@ class UnifiedOpenAIScheduler {
             }
           }
 
-          // 检查模型支持（仅在明确设置了supportedModels且不为空时才检查）
-          // 如果没有设置supportedModels或为空数组，则支持所有模型
-          if (requestedModel && account.supportedModels && account.supportedModels.length > 0) {
-            const modelSupported = account.supportedModels.includes(requestedModel)
-            if (!modelSupported) {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - doesn't support model ${requestedModel}`
-              )
-              continue
-            }
+          // 检查端点模式与模型支持
+          if (
+            !this._accountMatchesRequirement(account, accountType, requestedModel, requiredEndpoint)
+          ) {
+            logger.debug(
+              `⏭️ Skipping group member ${accountType} account ${account.name} - incompatible with ${requiredEndpoint || 'responses'}/${requestedModel || '*'}`
+            )
+            continue
           }
 
           // 添加到可用账户列表
@@ -961,9 +1110,9 @@ class UnifiedOpenAIScheduler {
       const selectedAccount = sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
-      if (sessionHash) {
+      if (stickyKey) {
         await this._setSessionMapping(
-          sessionHash,
+          stickyKey,
           selectedAccount.accountId,
           selectedAccount.accountType
         )

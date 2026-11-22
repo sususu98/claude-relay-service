@@ -1786,13 +1786,29 @@
                   v-model="form.providerEndpoint"
                   class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
                 >
-                  <option value="responses">Responses（推荐）</option>
+                  <option value="responses">Responses（仅 /v1/responses）</option>
+                  <option value="chat">Chat Completions（原生透传 /v1/chat/completions）</option>
+                  <option value="passthrough">
+                    双协议直通（Chat + Responses 原样透传，推荐 CPA）
+                  </option>
                   <option value="auto">自动（保持原始路径）</option>
                 </select>
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  指定 Provider 支持的端点类型。Responses 会将所有请求路由到（包括来自
-                  /v1/chat/completions 的请求会自动转换）；自动则保持客户端请求的原始路径
+                  Responses 仅走 /v1/responses；Chat Completions 直接透传 /v1/chat/completions
+                  不做翻译；双协议直通按客户端原协议透传 Chat 与 Responses 给上游（如 CPA）
                 </p>
+              </div>
+
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  >支持模型白名单（可选）</label
+                >
+                <input
+                  v-model="form.openaiResponsesSupportedModelsText"
+                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                  placeholder="留空表示支持全部模型；多个用逗号分隔，支持通配符如 agy/*, gemini-4*"
+                  type="text"
+                />
               </div>
 
               <!-- 限流时长字段 - 隐藏不显示，使用默认值60 -->
@@ -3678,14 +3694,29 @@
                 v-model="form.providerEndpoint"
                 class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
               >
-                <option value="responses">Responses（推荐）</option>
-                <option value="completions">Chat Completions</option>
+                <option value="responses">Responses（仅 /v1/responses）</option>
+                <option value="chat">Chat Completions（原生透传 /v1/chat/completions）</option>
+                <option value="passthrough">
+                  双协议直通（Chat + Responses 原样透传，推荐 CPA）
+                </option>
                 <option value="auto">自动（保持原始路径）</option>
               </select>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                指定 Provider 支持的端点类型。Responses 会将所有请求路由到（包括来自
-                /v1/chat/completions 的请求会自动转换）；自动则保持原始路径
+                Responses 仅走 /v1/responses；Chat Completions 直接透传 /v1/chat/completions
+                不做翻译；双协议直通按客户端原协议透传 Chat 与 Responses 给上游（如 CPA）
               </p>
+            </div>
+
+            <div>
+              <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                >支持模型白名单（可选）</label
+              >
+              <input
+                v-model="form.openaiResponsesSupportedModelsText"
+                class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                placeholder="留空表示支持全部模型；多个用逗号分隔，支持通配符如 agy/*, gemini-4*"
+                type="text"
+              />
             </div>
 
             <!-- 限流时长字段 - 隐藏不显示，保持原值 -->
@@ -4595,7 +4626,13 @@ const form = ref({
   endpointType: props.account?.endpointType || 'anthropic',
   // OpenAI-Responses 特定字段
   baseApi: props.account?.baseApi || '',
-  providerEndpoint: props.account?.providerEndpoint || 'responses',
+  providerEndpoint:
+    props.account?.providerEndpoint === 'completions'
+      ? 'chat'
+      : props.account?.providerEndpoint || 'responses',
+  openaiResponsesSupportedModelsText: Array.isArray(props.account?.supportedModels)
+    ? props.account.supportedModels.join(', ')
+    : '',
   grokBaseUrlMode: deriveGrokBaseUrlMode(props.account),
   customUpstream: toFormBoolean(props.account?.customUpstream),
   // Gemini-API 特定字段
@@ -5824,6 +5861,10 @@ const createAccount = async () => {
       data.apiKey = form.value.apiKey
       data.userAgent = form.value.userAgent || ''
       data.providerEndpoint = form.value.providerEndpoint || 'responses'
+      data.supportedModels = String(form.value.openaiResponsesSupportedModelsText || '')
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
       data.priority = form.value.priority || 50
       data.rateLimitDuration = 60 // 默认值60，不从用户输入获取
       data.dailyQuota = form.value.dailyQuota || 0
@@ -6185,6 +6226,10 @@ const updateAccount = async () => {
       }
       data.userAgent = form.value.userAgent || ''
       data.providerEndpoint = form.value.providerEndpoint || 'responses'
+      data.supportedModels = String(form.value.openaiResponsesSupportedModelsText || '')
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
       data.priority = form.value.priority || 50
       // 编辑时不上传 rateLimitDuration，保持原值
       data.dailyQuota = form.value.dailyQuota || 0
@@ -6837,7 +6882,13 @@ watch(
         deploymentName: newAccount.deploymentName || '',
         // OpenAI-Responses 特定字段
         baseApi: newAccount.baseApi || '',
-        providerEndpoint: newAccount.providerEndpoint || 'responses',
+        providerEndpoint:
+          newAccount.providerEndpoint === 'completions'
+            ? 'chat'
+            : newAccount.providerEndpoint || 'responses',
+        openaiResponsesSupportedModelsText: Array.isArray(newAccount.supportedModels)
+          ? newAccount.supportedModels.join(', ')
+          : '',
         // Grok 特定字段。这里重建的是整个 form 对象，漏掉这两个键会让编辑 Grok 账户时
         // grokBaseUrlMode 变成 undefined、baseUrl 变成 Gemini 的默认地址。
         grokBaseUrlMode: deriveGrokBaseUrlMode(newAccount),
