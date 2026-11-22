@@ -560,7 +560,6 @@ class PricingService {
     const isFastModeRequest = hasFastModeBeta && hasFastSpeedSignal
     const standardPricing = this.getModelPricing(modelName)
     const pricing = standardPricing
-    const isLongContextModeEnabled = isLongContextModel || hasContext1mBeta
     // Per official Anthropic pricing: all Claude models have flat pricing with no 200K+ premium
     // https://platform.claude.com/docs/en/about-claude/pricing
     const ignores200kLongContextPricing =
@@ -574,12 +573,23 @@ class PricingService {
       pricing &&
       pricing.input_cost_per_token_above_272k_tokens !== null &&
       pricing.input_cost_per_token_above_272k_tokens !== undefined
+    const has200kPricing =
+      pricing &&
+      pricing.input_cost_per_token_above_200k_tokens !== null &&
+      pricing.input_cost_per_token_above_200k_tokens !== undefined
+    // xAI 对 Grok 4.5 的 200K+ 请求自动应用长上下文价格，不需要 [1m] 后缀。
+    const isXaiTieredPricing =
+      has200kPricing &&
+      typeof pricing?.litellm_provider === 'string' &&
+      pricing.litellm_provider.toLowerCase() === 'xai'
+    const isLongContextModeEnabled =
+      isLongContextModel || hasContext1mBeta || isXaiTieredPricing
     const longContextThreshold272k = 272000
 
     // Fast Mode 倍率：优先从 provider_specific_entry.fast 读取，默认 6 倍
     const fastMultiplier = isFastModeRequest ? pricing?.provider_specific_entry?.fast || 6 : 1
 
-    // 分档计费触发：优先检查 272K（GPT-5.x），其次 200K（Claude [1m]）
+    // 分档计费触发：优先检查 272K（GPT-5.x），其次 200K（Grok 自动、其他模型按显式长上下文模式）
     if (has272kPricing && totalInputTokens > longContextThreshold272k) {
       isLongContextRequest = true
       useLongContextPricing = true

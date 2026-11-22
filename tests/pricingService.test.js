@@ -323,6 +323,109 @@ describe('PricingService - Long Context Pricing', () => {
     })
   })
 
+  describe('xAI Grok 4.5 / 4.6 官方价格 2 倍及 200K 分档', () => {
+    const grokPricing = {
+      input_cost_per_token: 0.000004,
+      input_cost_per_token_above_200k_tokens: 0.000008,
+      output_cost_per_token: 0.000012,
+      output_cost_per_token_above_200k_tokens: 0.000024,
+      cache_creation_input_token_cost: 0,
+      cache_read_input_token_cost: 0.0000006,
+      cache_read_input_token_cost_above_200k_tokens: 0.0000012,
+      litellm_provider: 'xai'
+    }
+
+    it('不超过 200K 时使用官方短上下文价格的 2 倍', () => {
+      pricingService.pricingData['grok-4.5'] = grokPricing
+      const usage = {
+        input_tokens: 150000,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 49999
+      }
+
+      const result = pricingService.calculateCost(usage, 'grok-4.5')
+
+      expect(result.isLongContextRequest).toBe(false)
+      expect(result.pricing.input).toBe(0.000004)
+      expect(result.pricing.output).toBe(0.000012)
+      expect(result.pricing.cacheRead).toBe(0.0000006)
+    })
+
+    it('超过 200K 时自动使用官方长上下文价格的 2 倍', () => {
+      pricingService.pricingData['grok-4.5'] = grokPricing
+      const usage = {
+        input_tokens: 150001,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 50000
+      }
+
+      const result = pricingService.calculateCost(usage, 'grok-4.5')
+
+      expect(result.isLongContextRequest).toBe(true)
+      expect(result.pricing.input).toBe(0.000008)
+      expect(result.pricing.output).toBe(0.000024)
+      expect(result.pricing.cacheRead).toBe(0.0000012)
+    })
+
+    it('Grok 4.6 与 Grok 4.5 同价且支持 200K 分档', () => {
+      pricingService.pricingData['grok-4.6'] = grokPricing
+      const shortUsage = {
+        input_tokens: 100000,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      }
+      const shortResult = pricingService.calculateCost(shortUsage, 'grok-4.6')
+      expect(shortResult.isLongContextRequest).toBe(false)
+      expect(shortResult.pricing.input).toBe(0.000004)
+      expect(shortResult.pricing.output).toBe(0.000012)
+
+      const longUsage = {
+        input_tokens: 200001,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      }
+      const longResult = pricingService.calculateCost(longUsage, 'grok-4.6')
+      expect(longResult.isLongContextRequest).toBe(true)
+      expect(longResult.pricing.input).toBe(0.000008)
+      expect(longResult.pricing.output).toBe(0.000024)
+    })
+
+    it('Kimi K3 / K3-256k 应按官方价格 3 倍计费（$9/$45/$0.9 per MTok）', () => {
+      const kimiPricing = {
+        input_cost_per_token: 0.000009,
+        output_cost_per_token: 0.000045,
+        cache_read_input_token_cost: 0.0000009,
+        litellm_provider: 'moonshot'
+      }
+      pricingService.pricingData['kimi-k3'] = kimiPricing
+      pricingService.pricingData['kimi-k3-256k'] = kimiPricing
+
+      const usage = {
+        input_tokens: 10000,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 5000
+      }
+
+      const resultK3 = pricingService.calculateCost(usage, 'kimi-k3')
+      expect(resultK3.pricing.input).toBe(0.000009)
+      expect(resultK3.pricing.output).toBe(0.000045)
+      expect(resultK3.pricing.cacheRead).toBe(0.0000009)
+      // cost: 10000*0.000009 + 1000*0.000045 + 5000*0.0000009 = 0.09 + 0.045 + 0.0045 = 0.1395
+      expect(resultK3.totalCost).toBeCloseTo(0.1395, 6)
+
+      const resultK3256k = pricingService.calculateCost(usage, 'kimi-k3-256k')
+      expect(resultK3256k.pricing.input).toBe(0.000009)
+      expect(resultK3256k.pricing.output).toBe(0.000045)
+      expect(resultK3256k.pricing.cacheRead).toBe(0.0000009)
+      expect(resultK3256k.totalCost).toBeCloseTo(0.1395, 6)
+    })
+  })
+
   describe('兼容性测试', () => {
     it('非 [1m] 模型不受影响，始终使用基础价格', () => {
       const usage = {
