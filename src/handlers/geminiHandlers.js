@@ -252,32 +252,60 @@ function isReadableStream(value) {
 }
 
 /**
- * 清理 contents 中 functionResponse 不被标准 Gemini API 支持的字段
- * 标准 Gemini API (generativelanguage.googleapis.com) 的 functionResponse 只支持 name 和 response 字段，不支持 id 字段
- * 注意：此函数仅用于 API Key 账户，OAuth 账户使用的 Cloud Code Assist API 可能支持额外字段
+ * 可选清理 contents 中 functionCall / functionResponse 的 id 字段
+ * 默认原样保留 functionResponse.id 及其他标准 v1beta 字段，确保与前置 functionCall.id 配对一致；
+ * 仅在显式开启 STRIP_GEMINI_FUNCTION_RESPONSE_ID=true 时，才对称剥离 functionCall.id 与 functionResponse.id，
+ * 避免单边移除导致上游校验报错。
  */
-function sanitizeFunctionResponsesForApiKey(contents) {
-  if (!contents || !Array.isArray(contents)) {
+function sanitizeFunctionResponsesForApiKey(contents, options = {}) {
+  const shouldStripId =
+    options.stripId === true ||
+    (options.stripId !== false &&
+      String(process.env.STRIP_GEMINI_FUNCTION_RESPONSE_ID || '').toLowerCase() === 'true')
+  if (!shouldStripId || !contents || !Array.isArray(contents)) {
     return contents
   }
 
   return contents.map((content) => {
-    if (!content.parts || !Array.isArray(content.parts)) {
+    if (!content || !Array.isArray(content.parts)) {
       return content
     }
 
     const sanitizedParts = content.parts.map((part) => {
-      if (part.functionResponse) {
-        // 只保留标准 Gemini API 支持的字段：name 和 response
-        const { name, response } = part.functionResponse
-        return {
-          functionResponse: {
-            name,
-            response
-          }
-        }
+      if (!part || typeof part !== 'object') {
+        return part
       }
-      return part
+
+      let nextPart = part
+      let changed = false
+
+      if (
+        part.functionResponse &&
+        typeof part.functionResponse === 'object' &&
+        Object.prototype.hasOwnProperty.call(part.functionResponse, 'id')
+      ) {
+        const { id: _ignoredResponseId, ...restResponse } = part.functionResponse
+        nextPart = {
+          ...nextPart,
+          functionResponse: restResponse
+        }
+        changed = true
+      }
+
+      if (
+        part.functionCall &&
+        typeof part.functionCall === 'object' &&
+        Object.prototype.hasOwnProperty.call(part.functionCall, 'id')
+      ) {
+        const { id: _ignoredCallId, ...restCall } = part.functionCall
+        nextPart = {
+          ...nextPart,
+          functionCall: restCall
+        }
+        changed = true
+      }
+
+      return changed ? nextPart : part
     })
 
     return {
@@ -3049,5 +3077,6 @@ module.exports = {
 
   // 标准 Gemini API 格式处理函数
   handleStandardGenerateContent,
-  handleStandardStreamGenerateContent
+  handleStandardStreamGenerateContent,
+  sanitizeFunctionResponsesForApiKey
 }
