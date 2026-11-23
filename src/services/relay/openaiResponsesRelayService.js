@@ -41,6 +41,7 @@ class OpenAIResponsesRelayService {
   // 处理请求转发
   async handleRequest(req, res, account, apiKeyData) {
     let abortController = null
+    let removeClientDisconnectListener = null
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
     const sessionHash = sessionId
@@ -57,16 +58,25 @@ class OpenAIResponsesRelayService {
       // 创建 AbortController 用于取消请求
       abortController = new AbortController()
 
-      // 设置客户端断开监听器
+      // 设置客户端断开监听器：仅监听 res.close 且排除已正常写完的响应，
+      // 避免 Node 18 POST 读体后 req.close 误触发或非流式成功回包后打印误导性断开日志
       const handleClientDisconnect = () => {
+        if (res.writableFinished) {
+          return
+        }
         logger.info('🔌 Client disconnected, aborting OpenAI-Responses request')
         if (abortController && !abortController.signal.aborted) {
           abortController.abort()
         }
       }
 
+      removeClientDisconnectListener = () => {
+        if (typeof res.removeListener === 'function') {
+          res.removeListener('close', handleClientDisconnect)
+        }
+      }
+
       // 监听客户端断开事件
-      req.once('close', handleClientDisconnect)
       res.once('close', handleClientDisconnect)
 
       // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
@@ -141,6 +151,8 @@ class OpenAIResponsesRelayService {
         }
       }
 
+      const isStream = requestBody?.stream === true
+
       // 配置请求选项
       const requestOptions = {
         method: req.method,
@@ -148,7 +160,7 @@ class OpenAIResponsesRelayService {
         headers,
         data: requestBody,
         timeout: this.defaultTimeout,
-        responseType: requestBody?.stream ? 'stream' : 'json',
+        responseType: isStream ? 'stream' : 'json',
         validateStatus: () => true, // 允许处理所有状态码
         signal: abortController.signal
       }
@@ -172,7 +184,7 @@ class OpenAIResponsesRelayService {
         accountName: account.name,
         targetUrl,
         method: req.method,
-        stream: req.body?.stream || false,
+        stream: isStream,
         model: req.body?.model || 'unknown',
         userAgent: headers['User-Agent'] || 'not set'
       })
@@ -185,7 +197,7 @@ class OpenAIResponsesRelayService {
         const { resetsInSeconds, errorData } = await this._handle429Error(
           account,
           response,
-          req.body?.stream,
+          isStream,
           sessionHash
         )
 
@@ -211,6 +223,7 @@ class OpenAIResponsesRelayService {
             resets_in_seconds: resetsInSeconds
           }
         }
+        removeClientDisconnectListener()
         return res.status(429).json(errorResponse)
       }
 
@@ -300,8 +313,7 @@ class OpenAIResponsesRelayService {
           }
 
           // 清理监听器
-          req.removeListener('close', handleClientDisconnect)
-          res.removeListener('close', handleClientDisconnect)
+          removeClientDisconnectListener()
 
           return res.status(401).json(unauthorizedResponse)
         }
@@ -330,8 +342,7 @@ class OpenAIResponsesRelayService {
         }
 
         // 清理监听器
-        req.removeListener('close', handleClientDisconnect)
-        res.removeListener('close', handleClientDisconnect)
+        removeClientDisconnectListener()
 
         return res
           .status(response.status)
@@ -342,7 +353,7 @@ class OpenAIResponsesRelayService {
       await this._throttledUpdateLastUsedAt(account.id)
 
       // 处理流式响应
-      if (req.body?.stream && response.data && typeof response.data.pipe === 'function') {
+      if (isStream && response.data && typeof response.data.pipe === 'function') {
         return this._handleStreamResponse(
           response,
           res,
@@ -354,9 +365,11 @@ class OpenAIResponsesRelayService {
         )
       }
 
-      // 处理非流式响应
+      // 处理非流式响应：先摘掉断连监听器，避免正常回包后 res.close 触发误导性断开日志
+      removeClientDisconnectListener()
       return this._handleNormalResponse(response, res, account, apiKeyData, req.body?.model, req)
     } catch (error) {
+      removeClientDisconnectListener?.()
       // 清理 AbortController
       if (abortController && !abortController.signal.aborted) {
         abortController.abort()
@@ -572,6 +585,33 @@ class OpenAIResponsesRelayService {
       }
     }
 
+    // 处理客户端断开连接
+    const cleanup = () => {
+      streamEnded = true
+      try {
+        response.data?.unpipe?.(res)
+        response.data?.destroy?.()
+      } catch (_) {
+        // 忽略清理错误
+      }
+    }
+
+    const onResponseClose = () => {
+      if (!res.writableFinished) {
+        cleanup()
+      }
+    }
+
+    const removeStreamDisconnectListeners = () => {
+      if (typeof res.removeListener === 'function') {
+        res.removeListener('close', handleClientDisconnect)
+        res.removeListener('close', onResponseClose)
+      }
+      if (typeof req.removeListener === 'function') {
+        req.removeListener('aborted', cleanup)
+      }
+    }
+
     // 监听数据流
     response.data.on('data', (chunk) => {
       try {
@@ -689,8 +729,7 @@ class OpenAIResponsesRelayService {
       }
 
       // 清理监听器
-      req.removeListener('close', handleClientDisconnect)
-      res.removeListener('close', handleClientDisconnect)
+      removeStreamDisconnectListeners()
 
       if (!res.destroyed) {
         res.end()
@@ -708,8 +747,7 @@ class OpenAIResponsesRelayService {
       logger.error('Stream error:', error)
 
       // 清理监听器
-      req.removeListener('close', handleClientDisconnect)
-      res.removeListener('close', handleClientDisconnect)
+      removeStreamDisconnectListeners()
 
       if (!res.headersSent) {
         res.status(502).json({ error: { message: 'Upstream stream error' } })
@@ -718,19 +756,8 @@ class OpenAIResponsesRelayService {
       }
     })
 
-    // 处理客户端断开连接
-    const cleanup = () => {
-      streamEnded = true
-      try {
-        response.data?.unpipe?.(res)
-        response.data?.destroy?.()
-      } catch (_) {
-        // 忽略清理错误
-      }
-    }
-
-    req.on('close', cleanup)
-    req.on('aborted', cleanup)
+    res.once('close', onResponseClose)
+    req.once('aborted', cleanup)
   }
 
   // 处理非流式响应

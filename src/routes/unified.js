@@ -1,4 +1,5 @@
 const express = require('express')
+const { StringDecoder } = require('string_decoder')
 const { authenticateApiKey } = require('../middleware/auth')
 const logger = require('../utils/logger')
 const { handleChatCompletion } = require('./openaiClaudeRoutes')
@@ -205,22 +206,65 @@ async function routeToBackend(req, res, requestedModel) {
     }
     // 响应格式拦截：Codex/Responses → OpenAI Chat Completions
     const codexConverter = new CodexToOpenAIConverter()
-    const originalJson = res.json.bind(res)
+    const isStream = req.body.stream === true
 
-    // 流式：patch res.write/res.end 拦截 SSE 事件
-    // 与 openaiRoutes 保持一致：stream 缺省时视为流式（stream !== false）
-    if (req.body.stream !== false) {
+    // 流式：遵循 OpenAI Chat Completions 规范，仅显式 stream === true 时拦截 SSE 事件
+    // 缺省 stream 视为非流式，避免与下游非流式 res.json() 冲突导致 Content-Length 截断挂起
+    if (isStream) {
       const streamState = codexConverter.createStreamState()
       const sseBuffer = { data: '' }
+      const decoder = new StringDecoder('utf8')
       const originalWrite = res.write.bind(res)
       const originalEnd = res.end.bind(res)
+      let streamEnded = false
+
+      const decodeChunk = (chunk) => {
+        if (typeof chunk === 'string') {
+          return chunk
+        }
+        return decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+
+      const processSseLines = (text) => {
+        const lines = text.split('\n')
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            const jsonStr = line.slice(5).trim()
+            if (!jsonStr || jsonStr === '[DONE]') {
+              continue
+            }
+
+            try {
+              const eventData = JSON.parse(jsonStr)
+              if (eventData.error) {
+                originalWrite(`data: ${jsonStr}\n\n`)
+                continue
+              }
+              const converted = codexConverter.convertStreamChunk(
+                eventData,
+                requestedModel,
+                streamState
+              )
+              for (const c of converted) {
+                originalWrite(c)
+              }
+            } catch (e) {
+              originalWrite(`data: ${jsonStr}\n\n`)
+            }
+          }
+        }
+      }
 
       res.write = function (chunk, encoding, callback) {
         if (res.statusCode >= 400) {
           return originalWrite(chunk, encoding, callback)
         }
+        if (typeof encoding === 'function') {
+          callback = encoding
+          encoding = undefined
+        }
 
-        const str = (typeof chunk === 'string' ? chunk : chunk.toString()).replace(/\r\n/g, '\n')
+        const str = decodeChunk(chunk).replace(/\r\n/g, '\n')
         sseBuffer.data += str
 
         let idx
@@ -232,33 +276,7 @@ async function routeToBackend(req, res, requestedModel) {
             continue
           }
 
-          const lines = event.split('\n')
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const jsonStr = line.slice(6)
-              if (!jsonStr || jsonStr === '[DONE]') {
-                continue
-              }
-
-              try {
-                const eventData = JSON.parse(jsonStr)
-                if (eventData.error) {
-                  originalWrite(`data: ${jsonStr}\n\n`)
-                  continue
-                }
-                const converted = codexConverter.convertStreamChunk(
-                  eventData,
-                  requestedModel,
-                  streamState
-                )
-                for (const c of converted) {
-                  originalWrite(c)
-                }
-              } catch (e) {
-                originalWrite(`data: ${jsonStr}\n\n`)
-              }
-            }
-          }
+          processSseLines(event)
         }
 
         if (typeof callback === 'function') {
@@ -268,71 +286,56 @@ async function routeToBackend(req, res, requestedModel) {
       }
 
       res.end = function (chunk, encoding, callback) {
-        if (res.statusCode < 400) {
-          // 处理 res.end(chunk) 传入的最后一块数据
-          if (chunk) {
-            const str = (typeof chunk === 'string' ? chunk : chunk.toString()).replace(
-              /\r\n/g,
-              '\n'
-            )
-            sseBuffer.data += str
-            chunk = undefined
-          }
-
-          if (sseBuffer.data.trim()) {
-            const remaining = `${sseBuffer.data}\n\n`
-            sseBuffer.data = ''
-
-            const lines = remaining.split('\n')
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const jsonStr = line.slice(6)
-                if (!jsonStr || jsonStr === '[DONE]') {
-                  continue
-                }
-                try {
-                  const eventData = JSON.parse(jsonStr)
-                  if (eventData.error) {
-                    originalWrite(`data: ${jsonStr}\n\n`)
-                  } else {
-                    const converted = codexConverter.convertStreamChunk(
-                      eventData,
-                      requestedModel,
-                      streamState
-                    )
-                    for (const c of converted) {
-                      originalWrite(c)
-                    }
-                  }
-                } catch (e) {
-                  originalWrite(`data: ${jsonStr}\n\n`)
-                }
-              }
-            }
-          }
-
-          originalWrite('data: [DONE]\n\n')
+        if (res.statusCode >= 400 || streamEnded) {
+          return originalEnd(chunk, encoding, callback)
         }
-        return originalEnd(chunk, encoding, callback)
-      }
-    }
+        streamEnded = true
+        if (typeof chunk === 'function') {
+          callback = chunk
+          chunk = undefined
+          encoding = undefined
+        } else if (typeof encoding === 'function') {
+          callback = encoding
+          encoding = undefined
+        }
 
-    // 非流式：patch res.json 拦截 JSON 响应
-    // chatgpt.com 后端返回 { type: "response.completed", response: {...} }
-    // api.openai.com 后端返回标准 Response 对象 { object: "response", status, output, ... }
-    res.json = function (data) {
-      if (res.statusCode >= 400) {
-        return originalJson(data)
+        // 处理 res.end(chunk) 传入的最后一块数据
+        if (chunk) {
+          sseBuffer.data += decodeChunk(chunk).replace(/\r\n/g, '\n')
+        }
+        const trailing = decoder.end()
+        if (trailing) {
+          sseBuffer.data += trailing.replace(/\r\n/g, '\n')
+        }
+
+        if (sseBuffer.data.trim()) {
+          const remaining = `${sseBuffer.data}\n\n`
+          sseBuffer.data = ''
+          processSseLines(remaining)
+        }
+
+        originalWrite('data: [DONE]\n\n')
+        return typeof callback === 'function' ? originalEnd(callback) : originalEnd()
       }
-      if (data && (data.type === 'response.completed' || data.object === 'response')) {
-        try {
-          return originalJson(codexConverter.convertResponse(data, requestedModel))
-        } catch (e) {
-          logger.debug('Codex response conversion failed, passing through:', e.message)
+    } else {
+      // 非流式：patch res.json 拦截 JSON 响应
+      // chatgpt.com 后端返回 { type: "response.completed", response: {...} }
+      // api.openai.com 后端返回标准 Response 对象 { object: "response", status, output, ... }
+      const originalJson = res.json.bind(res)
+      res.json = function (data) {
+        if (res.statusCode >= 400) {
           return originalJson(data)
         }
+        if (data && (data.type === 'response.completed' || data.object === 'response')) {
+          try {
+            return originalJson(codexConverter.convertResponse(data, requestedModel))
+          } catch (e) {
+            logger.debug('Codex response conversion failed, passing through:', e.message)
+            return originalJson(data)
+          }
+        }
+        return originalJson(data)
       }
-      return originalJson(data)
     }
 
     // 输入转换：Chat Completions → Responses API 格式

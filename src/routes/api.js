@@ -248,11 +248,6 @@ async function handleMessagesRequest(req, res) {
       }
 
       // 流式响应 - 只使用官方真实usage数据
-      res.setHeader('Content-Type', 'text/event-stream')
-      res.setHeader('Cache-Control', 'no-cache')
-      res.setHeader('Connection', 'keep-alive')
-      res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('X-Accel-Buffering', 'no') // 禁用 Nginx 缓冲
       // ⚠️ 检查 headers 是否已发送（可能在排队心跳时已设置）
       if (!res.headersSent) {
         res.setHeader('Content-Type', 'text/event-stream')

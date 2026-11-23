@@ -396,9 +396,7 @@ class CodexToOpenAIConverter {
     if (chatBody.model) {
       result.model = chatBody.model
     }
-    if (chatBody.stream !== undefined) {
-      result.stream = chatBody.stream
-    }
+    result.stream = chatBody.stream === true
 
     // messages → input（instructions 由调用方设置，此处只转换消息到 input）
     const input = []
